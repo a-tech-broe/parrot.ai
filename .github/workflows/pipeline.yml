@@ -1,0 +1,779 @@
+name: Pipeline — Parrot
+
+# ── Triggers ──────────────────────────────────────────────────────────────────
+# PR  → tests + IaC scans + Docker scan + terraform plan (posted as PR comment)
+# main → all of the above + terraform apply + bootstrap + deploy + smoke tests
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents:        read
+  pull-requests:   write   # post Terraform plan to PR
+  security-events: write   # upload SARIF to GitHub Security tab
+
+env:
+  AWS_REGION:       ${{ vars.AWS_REGION || 'us-east-1' }}
+  TF_VERSION:       "1.9.8"
+  TF_IN_AUTOMATION: "true"
+
+# ──────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ── 1. Backend tests ─────────────────────────────────────────────────────────
+  test-backend:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: pytest
+        run: |
+          mkdir -p reports
+          pytest \
+            --ignore=tests/smoke \
+            -v \
+            --junitxml=reports/backend-junit.xml \
+            --cov=. \
+            --cov-report=xml:reports/coverage.xml \
+            --cov-report=term-missing
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-test-results
+          path: reports/
+          retention-days: 30
+
+  # ── 2. Frontend tests ─────────────────────────────────────────────────────────
+  test-frontend:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: cd frontend && npm ci
+
+      - name: Vitest
+        run: cd frontend && npm test
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frontend-test-results
+          path: frontend/reports/
+          retention-days: 30
+
+  # ── 3. Dependency security scan ───────────────────────────────────────────────
+  scan-dependencies:
+    name: Dependency Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: pip-audit (Python)
+        run: |
+          mkdir -p reports
+          pip install pip-audit
+          pip-audit -r requirements.txt --format json \
+            --output reports/pip-audit.json --progress-spinner off 2>/dev/null || true
+          pip-audit -r requirements.txt --progress-spinner off
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: npm audit (Frontend)
+        run: |
+          cd frontend && npm ci --ignore-scripts
+          npm audit --json > ../reports/npm-audit.json 2>&1 || true
+          npm audit --audit-level=high
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dependency-scan-results
+          path: reports/
+          retention-days: 30
+
+  # ── 4. Terraform validate + plan ──────────────────────────────────────────────
+  # Runs on every PR and push.
+  # On PRs: posts plan output as a PR comment (updates on re-push).
+  # ─────────────────────────────────────────────────────────────────────────────
+  terraform-plan:
+    name: Terraform Validate + Plan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate backend secrets
+        env:
+          TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+          TF_LOCK_TABLE:   ${{ secrets.TF_LOCK_TABLE }}
+        run: |
+          missing=()
+          [ -z "$TF_STATE_BUCKET" ] && missing+=("TF_STATE_BUCKET")
+          [ -z "$TF_LOCK_TABLE"   ] && missing+=("TF_LOCK_TABLE")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing GitHub secret(s): ${missing[*]}"
+            echo "Run scripts/bootstrap-tfstate.sh and add its output values as GitHub secrets."
+            exit 1
+          fi
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: true   # enables stdout/stderr/exitcode step outputs
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        id: init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+
+      - name: Terraform Format check
+        id: fmt
+        run: terraform fmt -check -recursive -no-color
+        continue-on-error: true
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate -no-color
+
+      # IaC security scan — results also appear in GitHub Security tab
+      - name: Trivy — IaC scan (Terraform)
+        id: trivy-iac
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref:  terraform/
+          format:    sarif
+          output:    trivy-iac.sarif
+          severity:  CRITICAL,HIGH
+          exit-code: "0"    # warn only; hard-fail below
+        continue-on-error: true
+
+      - uses: github/codeql-action/upload-sarif@v4
+        if: always() && hashFiles('trivy-iac.sarif') != ''
+        with:
+          sarif_file: trivy-iac.sarif
+          category:   terraform-iac
+
+      - name: Trivy — fail on CRITICAL IaC findings
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref:  terraform/
+          format:    table
+          severity:  CRITICAL
+          exit-code: "1"
+
+      # Plan — wrapper captures stdout for the PR comment
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan \
+            -no-color \
+            -out=tfplan \
+            -var="ssh_public_key=${{ secrets.EC2_SSH_PUBLIC_KEY }}"
+        continue-on-error: true   # we handle failure explicitly below
+
+      # Post / update plan comment on PRs
+      - name: Post plan to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          FMT_OUTCOME:      ${{ steps.fmt.outcome }}
+          VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
+          PLAN_OUTCOME:     ${{ steps.plan.outcome }}
+          PLAN_STDOUT:      ${{ steps.plan.outputs.stdout }}
+        with:
+          script: |
+            const icon  = o => o === 'success' ? '✅' : o === 'skipped' ? '⏭️' : '❌'
+            const plan  = (process.env.PLAN_STDOUT || '(no output)').substring(0, 65000)
+
+            const body = [
+              '## 🏗️ Terraform Plan',
+              '',
+              '| Check | Result |',
+              '|-------|--------|',
+              `| Format   | ${icon(process.env.FMT_OUTCOME)} \`${process.env.FMT_OUTCOME}\` |`,
+              `| Validate | ${icon(process.env.VALIDATE_OUTCOME)} \`${process.env.VALIDATE_OUTCOME}\` |`,
+              `| Plan     | ${icon(process.env.PLAN_OUTCOME)} \`${process.env.PLAN_OUTCOME}\` |`,
+              '',
+              '<details><summary>📋 Show plan output</summary>',
+              '',
+              '```hcl',
+              plan,
+              '```',
+              '',
+              '</details>',
+              '',
+              `> Run [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) · commit \`${{ github.sha }}\``,
+            ].join('\n')
+
+            const { data: comments } = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+            })
+            const existing = comments.find(
+              c => c.user.type === 'Bot' && c.body.includes('🏗️ Terraform Plan')
+            )
+            if (existing) {
+              await github.rest.issues.updateComment({
+                comment_id: existing.id,
+                owner:      context.repo.owner,
+                repo:       context.repo.repo,
+                body,
+              })
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner:        context.repo.owner,
+                repo:         context.repo.repo,
+                body,
+              })
+            }
+
+      - name: Fail if plan errored
+        if: steps.plan.outcome == 'failure'
+        run: |
+          echo "Terraform plan failed — see output above"
+          exit 1
+
+      # Save plan binary so apply can reuse it (same pipeline run)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: terraform/tfplan
+          retention-days: 1
+
+  # ── 5. Build → Scan → Push ────────────────────────────────────────────────────
+  # Runs on every event (build + Trivy scan on PRs too).
+  # Push to Docker Hub happens only on main.
+  # Runs in PARALLEL with terraform-apply to save wall-clock time.
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-scan-push:
+    name: Build · Scan · Push
+    needs: [test-backend, test-frontend]
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-buildx-
+
+      - name: Login to Docker Hub
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Compute image reference
+        id: meta
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ] && \
+             [ "${{ github.event_name }}" != "pull_request" ]; then
+            IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/parrot:${{ github.sha }}"
+          else
+            IMAGE="parrot:${{ github.sha }}"   # PR: local tag, never pushed
+          fi
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Build Docker image (local)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.image }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to:   type=local,dest=/tmp/.buildx-cache-new,mode=max
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+
+      - name: Rotate build cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+      # Container scan — SARIF to GitHub Security tab
+      - name: Trivy — SARIF (GitHub Security tab)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}
+          format:    sarif
+          output:    trivy-container.sarif
+          severity:  CRITICAL,HIGH
+          exit-code: "0"
+
+      - uses: github/codeql-action/upload-sarif@v4
+        if: always() && hashFiles('trivy-container.sarif') != ''
+        with:
+          sarif_file: trivy-container.sarif
+          category:   container-scan
+
+      - name: Trivy — fail on CRITICAL container vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}
+          format:    table
+          severity:  CRITICAL
+          exit-code: "1"
+
+      - name: Trivy — full HTML report
+        if: always()
+        run: |
+          mkdir -p reports
+          curl -sfL \
+            https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl \
+            -o reports/html.tpl
+
+      - uses: aquasecurity/trivy-action@master
+        if: always()
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}
+          format:    template
+          template:  "@reports/html.tpl"
+          output:    reports/trivy-container.html
+          severity:  CRITICAL,HIGH,MEDIUM
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-container-report
+          path: reports/trivy-container.html
+          retention-days: 30
+
+      # Push (main only, after scan passes)
+      - name: Push image to Docker Hub
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+        run: |
+          docker push "$IMAGE"
+          docker tag  "$IMAGE" "${{ secrets.DOCKERHUB_USERNAME }}/parrot:latest"
+          docker push "${{ secrets.DOCKERHUB_USERNAME }}/parrot:latest"
+          echo "Pushed $IMAGE ✓"
+
+  # ── 6. Terraform Apply (main only) ────────────────────────────────────────────
+  # Runs in PARALLEL with build-scan-push to save wall-clock time.
+  # Downloads the plan artifact produced by terraform-plan.
+  # ─────────────────────────────────────────────────────────────────────────────
+  terraform-apply:
+    name: Terraform Apply
+    needs: [test-backend, test-frontend, scan-dependencies, terraform-plan]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    outputs:
+      ec2_ip: ${{ steps.tf-output.outputs.ec2_ip }}
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate backend secrets
+        env:
+          TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+          TF_LOCK_TABLE:   ${{ secrets.TF_LOCK_TABLE }}
+        run: |
+          missing=()
+          [ -z "$TF_STATE_BUCKET" ] && missing+=("TF_STATE_BUCKET")
+          [ -z "$TF_LOCK_TABLE"   ] && missing+=("TF_LOCK_TABLE")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing GitHub secret(s): ${missing[*]}"
+            echo "Run scripts/bootstrap-tfstate.sh and add its output values as GitHub secrets."
+            exit 1
+          fi
+
+      # Use wrapper: false so terraform output returns a clean value
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+
+      # Download plan produced by terraform-plan job
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: terraform/
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve tfplan
+
+      - name: Capture EC2 public IP
+        id: tf-output
+        run: |
+          IP=$(terraform output -raw ec2_public_ip)
+          echo "ec2_ip=$IP" >> "$GITHUB_OUTPUT"
+          echo "EC2 public IP: $IP"
+
+      - name: Terraform output summary
+        run: terraform output
+
+  # ── 7. Bootstrap EC2 (after terraform-apply) ──────────────────────────────────
+  # Installs Docker + AWS CLI on the freshly provisioned instance.
+  # Idempotent: each tool is only installed if not already present.
+  # ─────────────────────────────────────────────────────────────────────────────
+  bootstrap-ec2:
+    name: Bootstrap EC2
+    needs: terraform-apply
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install Docker + AWS CLI + curl (idempotent)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ needs.terraform-apply.outputs.ec2_ip }}
+          username: ubuntu
+          key:      ${{ secrets.EC2_SSH_KEY }}
+          port:     22
+          timeout:  300s
+          script: |
+            set -euo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+
+            # ── Docker ──────────────────────────────────────────────────────
+            if command -v docker &>/dev/null; then
+              echo "✓ Docker: $(docker --version)"
+            else
+              echo "→ Installing Docker..."
+              sudo apt-get update -y
+              sudo apt-get install -y ca-certificates curl gnupg
+              sudo install -m 0755 -d /etc/apt/keyrings
+              curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+                | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+              sudo chmod a+r /etc/apt/keyrings/docker.gpg
+              . /etc/os-release
+              echo \
+                "deb [arch=$(dpkg --print-architecture) \
+                     signed-by=/etc/apt/keyrings/docker.gpg] \
+                https://download.docker.com/linux/ubuntu $VERSION_CODENAME stable" \
+                | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+              sudo apt-get update -y
+              sudo apt-get install -y \
+                docker-ce docker-ce-cli containerd.io docker-buildx-plugin
+              sudo systemctl enable --now docker
+              sudo usermod -aG docker "$USER"
+              echo "✓ Docker installed: $(sudo docker --version)"
+            fi
+
+            # ── curl (Docker HEALTHCHECK) ────────────────────────────────────
+            command -v curl &>/dev/null \
+              && echo "✓ curl present" \
+              || (sudo apt-get install -y curl && echo "✓ curl installed")
+
+            echo ""
+            echo "Bootstrap complete ✓"
+
+  # ── 8. Deploy to EC2 ──────────────────────────────────────────────────────────
+  # Waits for image in Docker Hub (build-scan-push) AND EC2 ready (bootstrap-ec2).
+  # ─────────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to EC2
+    needs: [build-scan-push, bootstrap-ec2, terraform-apply]
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: http://${{ needs.terraform-apply.outputs.ec2_ip }}
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          IMAGE:             ${{ needs.build-scan-push.outputs.image }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN:    ${{ secrets.DOCKERHUB_TOKEN }}
+        with:
+          host:     ${{ needs.terraform-apply.outputs.ec2_ip }}
+          username: ubuntu
+          key:      ${{ secrets.EC2_SSH_KEY }}
+          port:     22
+          envs:     IMAGE,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN
+          timeout:  180s
+          script: |
+            set -euo pipefail
+
+            echo "=== Authenticating to Docker Hub ==="
+            echo "$DOCKERHUB_TOKEN" \
+              | sudo docker login --username "$DOCKERHUB_USERNAME" --password-stdin
+
+            echo "=== Storing rollback image ==="
+            PREVIOUS=$(sudo docker inspect parrot \
+              --format='{{.Config.Image}}' 2>/dev/null || true)
+
+            echo "=== Pulling $IMAGE ==="
+            sudo docker pull "$IMAGE"
+
+            echo "=== Replacing container ==="
+            sudo docker stop --time=30 parrot 2>/dev/null || true
+            sudo docker rm               parrot 2>/dev/null || true
+
+            sudo docker run -d \
+              --name parrot \
+              --restart unless-stopped \
+              -p 80:8000 \
+              --health-cmd 'curl -sf http://localhost:8000/ || exit 1' \
+              --health-interval 30s \
+              --health-timeout 10s \
+              --health-retries 3 \
+              --health-start-period 40s \
+              --log-driver json-file \
+              --log-opt max-size=50m \
+              --log-opt max-file=3 \
+              "$IMAGE"
+
+            echo "=== Waiting for healthy status ==="
+            for i in $(seq 1 12); do
+              STATUS=$(sudo docker inspect \
+                --format='{{.State.Health.Status}}' parrot 2>/dev/null \
+                || echo "unknown")
+              echo "  Attempt $i/12: $STATUS"
+              [ "$STATUS" = "healthy" ] && break
+              if [ "$i" -eq 12 ]; then
+                echo "ERR: Health check timed out — rolling back"
+                sudo docker stop parrot 2>/dev/null || true
+                sudo docker rm   parrot 2>/dev/null || true
+                if [ -n "$PREVIOUS" ]; then
+                  sudo docker run -d --name parrot \
+                    --restart unless-stopped -p 80:8000 "$PREVIOUS"
+                  echo "Rolled back to $PREVIOUS"
+                fi
+                exit 1
+              fi
+              sleep 10
+            done
+
+            sudo docker image prune -f
+            echo "=== Deploy complete: $IMAGE ==="
+
+  # ── 9. Smoke tests ────────────────────────────────────────────────────────────
+  smoke-test:
+    name: Smoke Tests
+    needs: [deploy, terraform-apply]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install requests junit-xml
+
+      - name: Wait for service
+        run: |
+          URL="http://${{ needs.terraform-apply.outputs.ec2_ip }}"
+          echo "Polling $URL ..."
+          for i in $(seq 1 18); do
+            if curl -sf --max-time 5 "$URL/"; then
+              echo "Service is up ✓"
+              break
+            fi
+            echo "  Attempt $i/18 — retrying in 10s"
+            sleep 10
+            [ "$i" -eq 18 ] && echo "ERR: timed out" && exit 1
+          done
+
+      - name: Run smoke tests
+        run: |
+          python tests/smoke/smoke_test.py \
+            --url  "http://${{ needs.terraform-apply.outputs.ec2_ip }}" \
+            --output reports/smoke-junit.xml
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-test-results
+          path: reports/smoke-junit.xml
+          retention-days: 30
+
+  # ── 10. Report (always runs) ───────────────────────────────────────────────────
+  report:
+    name: Report
+    needs:
+      - test-backend
+      - test-frontend
+      - scan-dependencies
+      - terraform-plan
+      - build-scan-push
+      - terraform-apply
+      - bootstrap-ec2
+      - deploy
+      - smoke-test
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+        continue-on-error: true
+
+      - name: Write GitHub Step Summary
+        env:
+          R_BACKEND:   ${{ needs.test-backend.result }}
+          R_FRONTEND:  ${{ needs.test-frontend.result }}
+          R_DEPS:      ${{ needs.scan-dependencies.result }}
+          R_TF_PLAN:   ${{ needs.terraform-plan.result }}
+          R_BUILD:     ${{ needs.build-scan-push.result }}
+          R_TF_APPLY:  ${{ needs.terraform-apply.result }}
+          R_BOOTSTRAP: ${{ needs.bootstrap-ec2.result }}
+          R_DEPLOY:    ${{ needs.deploy.result }}
+          R_SMOKE:     ${{ needs.smoke-test.result }}
+          EC2_IP:      ${{ needs.terraform-apply.outputs.ec2_ip }}
+          IMAGE:       ${{ needs.build-scan-push.outputs.image }}
+        run: |
+          icon() {
+            case $1 in
+              success)   printf '✅' ;;
+              failure)   printf '❌' ;;
+              skipped)   printf '⏭️' ;;
+              cancelled) printf '🚫' ;;
+              *)         printf '⚠️' ;;
+            esac
+          }
+
+          OVERALL=success
+          for s in "$R_BACKEND" "$R_FRONTEND" "$R_BUILD" \
+                   "$R_TF_APPLY" "$R_DEPLOY" "$R_SMOKE"; do
+            [ "$s" = "failure" ] && OVERALL=failure
+          done
+
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          # 🦜 Parrot — Pipeline Report
+
+          **Overall:** $(icon $OVERALL) ${OVERALL^^}
+          **Commit:** \`${{ github.sha }}\`
+          **Branch:** \`${{ github.ref_name }}\`
+          **Actor:**  ${{ github.actor }}
+          **Run:**    [${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          ## Jobs
+
+          | Job | Result |
+          |-----|--------|
+          | Backend Tests       | $(icon $R_BACKEND)   $R_BACKEND   |
+          | Frontend Tests      | $(icon $R_FRONTEND)  $R_FRONTEND  |
+          | Dependency Scan     | $(icon $R_DEPS)      $R_DEPS      |
+          | Terraform Plan      | $(icon $R_TF_PLAN)   $R_TF_PLAN   |
+          | Build · Scan · Push | $(icon $R_BUILD)     $R_BUILD     |
+          | Terraform Apply     | $(icon $R_TF_APPLY)  $R_TF_APPLY  |
+          | Bootstrap EC2       | $(icon $R_BOOTSTRAP) $R_BOOTSTRAP |
+          | Deploy              | $(icon $R_DEPLOY)    $R_DEPLOY    |
+          | Smoke Tests         | $(icon $R_SMOKE)     $R_SMOKE     |
+
+          ## Deployment
+
+          | | |
+          |-|-|
+          | EC2 IP | \`$EC2_IP\` |
+          | App URL | http://$EC2_IP |
+          | Image | \`$IMAGE\` |
+          EOF
+
+      - name: Slack notification
+        if: vars.SLACK_NOTIFICATIONS == 'true'
+        uses: slackapi/slack-github-action@v1.26.0
+        env:
+          SLACK_WEBHOOK_URL:  ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+        with:
+          payload: |
+            {
+              "text": "${{ needs.smoke-test.result == 'success' && '✅' || needs.deploy.result == 'skipped' && '🔍' || '❌' }} *Parrot* — ${{ needs.smoke-test.result == 'success' && 'deployed to maibaaki.com' || needs.deploy.result == 'skipped' && 'PR checks passed' || 'pipeline failed' }}",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "${{ needs.smoke-test.result == 'success' && '✅ Deployed to maibaaki.com' || needs.deploy.result == 'skipped' && '🔍 PR Checks Passed' || '❌ Pipeline Failed' }}"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    { "type": "mrkdwn", "text": "*Branch:*\n`${{ github.ref_name }}`" },
+                    { "type": "mrkdwn", "text": "*Commit:*\n`${{ github.sha }}`" },
+                    { "type": "mrkdwn", "text": "*Actor:*\n${{ github.actor }}" },
+                    { "type": "mrkdwn", "text": "*EC2:*\nhttp://${{ needs.terraform-apply.outputs.ec2_ip }}" }
+                  ]
+                },
+                {
+                  "type": "actions",
+                  "elements": [{
+                    "type": "button",
+                    "text": { "type": "plain_text", "text": "View Run" },
+                    "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                  }]
+                }
+              ]
+            }
