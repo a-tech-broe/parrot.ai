@@ -20,8 +20,7 @@ permissions:
   security-events: write   # upload SARIF to GitHub Security tab
 
 env:
-  AWS_REGION:       ${{ vars.AWS_REGION       || 'us-east-1' }}
-  ECR_REPOSITORY:   ${{ vars.ECR_REPOSITORY   || 'parrot'    }}
+  AWS_REGION:       ${{ vars.AWS_REGION || 'us-east-1' }}
   TF_VERSION:       "1.9.8"
   TF_IN_AUTOMATION: "true"
 
@@ -290,7 +289,7 @@ jobs:
 
   # ── 5. Build → Scan → Push ────────────────────────────────────────────────────
   # Runs on every event (build + Trivy scan on PRs too).
-  # Push to ECR happens only on main.
+  # Push to Docker Hub happens only on main.
   # Runs in PARALLEL with terraform-apply to save wall-clock time.
   # ─────────────────────────────────────────────────────────────────────────────
   build-scan-push:
@@ -298,8 +297,7 @@ jobs:
     needs: [test-backend, test-frontend]
     runs-on: ubuntu-latest
     outputs:
-      image:        ${{ steps.meta.outputs.image }}
-      ecr-registry: ${{ steps.meta.outputs.registry }}
+      image: ${{ steps.meta.outputs.image }}
 
     steps:
       - uses: actions/checkout@v4
@@ -312,59 +310,23 @@ jobs:
           key: ${{ runner.os }}-buildx-${{ github.sha }}
           restore-keys: ${{ runner.os }}-buildx-
 
-      # ECR auth — only needed on main for the push step
-      - name: Configure AWS credentials
+      - name: Login to Docker Hub
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: docker/login-action@v3
         with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ env.AWS_REGION }}
-
-      - name: Login to Amazon ECR
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      # Ensure ECR repository exists (idempotent; separate from Terraform scope)
-      - name: Create ECR repository + lifecycle policy
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-        run: |
-          aws ecr describe-repositories \
-            --repository-names "$ECR_REPOSITORY" --region "$AWS_REGION" 2>/dev/null \
-          || aws ecr create-repository \
-               --repository-name "$ECR_REPOSITORY" \
-               --image-scanning-configuration scanOnPush=true \
-               --encryption-configuration encryptionType=AES256 \
-               --region "$AWS_REGION"
-
-          aws ecr put-lifecycle-policy \
-            --repository-name "$ECR_REPOSITORY" \
-            --region "$AWS_REGION" \
-            --lifecycle-policy-text '{
-              "rules":[
-                {"rulePriority":1,"description":"Expire untagged after 1d",
-                 "selection":{"tagStatus":"untagged","countType":"sinceImagePushed",
-                              "countUnit":"days","countNumber":1},
-                 "action":{"type":"expire"}},
-                {"rulePriority":2,"description":"Keep last 10 tagged",
-                 "selection":{"tagStatus":"any","countType":"imageCountMoreThan",
-                              "countNumber":10},
-                 "action":{"type":"expire"}}
-              ]}'
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Compute image reference
         id: meta
         run: |
-          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
-          if [ -n "$REGISTRY" ]; then
-            IMAGE="$REGISTRY/$ECR_REPOSITORY:${{ github.sha }}"
+          if [ "${{ github.ref }}" = "refs/heads/main" ] && \
+             [ "${{ github.event_name }}" != "pull_request" ]; then
+            IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/parrot:${{ github.sha }}"
           else
             IMAGE="parrot:${{ github.sha }}"   # PR: local tag, never pushed
-            REGISTRY=""
           fi
-          echo "image=$IMAGE"       >> "$GITHUB_OUTPUT"
-          echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
       - name: Build Docker image (local)
         uses: docker/build-push-action@v5
@@ -426,15 +388,14 @@ jobs:
           retention-days: 30
 
       # Push (main only, after scan passes)
-      - name: Push image to ECR
+      - name: Push image to Docker Hub
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         env:
-          IMAGE:    ${{ steps.meta.outputs.image }}
-          REGISTRY: ${{ steps.meta.outputs.registry }}
+          IMAGE: ${{ steps.meta.outputs.image }}
         run: |
           docker push "$IMAGE"
-          docker tag  "$IMAGE" "$REGISTRY/$ECR_REPOSITORY:latest"
-          docker push "$REGISTRY/$ECR_REPOSITORY:latest"
+          docker tag  "$IMAGE" "${{ secrets.DOCKERHUB_USERNAME }}/parrot:latest"
+          docker push "${{ secrets.DOCKERHUB_USERNAME }}/parrot:latest"
           echo "Pushed $IMAGE ✓"
 
   # ── 6. Terraform Apply (main only) ────────────────────────────────────────────
@@ -557,20 +518,6 @@ jobs:
               echo "✓ Docker installed: $(sudo docker --version)"
             fi
 
-            # ── AWS CLI v2 ──────────────────────────────────────────────────
-            if command -v aws &>/dev/null; then
-              echo "✓ AWS CLI: $(aws --version 2>&1)"
-            else
-              echo "→ Installing AWS CLI v2..."
-              sudo apt-get install -y unzip
-              curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" \
-                -o /tmp/awscliv2.zip
-              unzip -q /tmp/awscliv2.zip -d /tmp
-              sudo /tmp/aws/install
-              rm -rf /tmp/aws /tmp/awscliv2.zip
-              echo "✓ AWS CLI installed: $(aws --version 2>&1)"
-            fi
-
             # ── curl (Docker HEALTHCHECK) ────────────────────────────────────
             command -v curl &>/dev/null \
               && echo "✓ curl present" \
@@ -580,7 +527,7 @@ jobs:
             echo "Bootstrap complete ✓"
 
   # ── 8. Deploy to EC2 ──────────────────────────────────────────────────────────
-  # Waits for image in ECR (build-scan-push) AND EC2 ready (bootstrap-ec2).
+  # Waits for image in Docker Hub (build-scan-push) AND EC2 ready (bootstrap-ec2).
   # ─────────────────────────────────────────────────────────────────────────────
   deploy:
     name: Deploy to EC2
@@ -594,22 +541,22 @@ jobs:
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         env:
-          IMAGE:    ${{ needs.build-scan-push.outputs.image }}
-          REGISTRY: ${{ needs.build-scan-push.outputs.ecr-registry }}
-          REGION:   ${{ env.AWS_REGION }}
+          IMAGE:             ${{ needs.build-scan-push.outputs.image }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN:    ${{ secrets.DOCKERHUB_TOKEN }}
         with:
           host:     ${{ needs.terraform-apply.outputs.ec2_ip }}
           username: ubuntu
           key:      ${{ secrets.EC2_SSH_KEY }}
           port:     22
-          envs:     IMAGE,REGISTRY,REGION
+          envs:     IMAGE,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN
           timeout:  180s
           script: |
             set -euo pipefail
 
-            echo "=== Authenticating to ECR ==="
-            aws ecr get-login-password --region "$REGION" \
-              | sudo docker login --username AWS --password-stdin "$REGISTRY"
+            echo "=== Authenticating to Docker Hub ==="
+            echo "$DOCKERHUB_TOKEN" \
+              | sudo docker login --username "$DOCKERHUB_USERNAME" --password-stdin
 
             echo "=== Storing rollback image ==="
             PREVIOUS=$(sudo docker inspect parrot \
