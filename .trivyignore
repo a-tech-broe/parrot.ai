@@ -1,0 +1,7 @@
+# CVE-2026-33845 — GnuTLS: DoS via DTLS zero-length fragment (libgnutls30t64)
+# Severity  : CRITICAL
+# Status    : no fixed version available (affected, 2026-05-06)
+# Rationale : Parrot serves HTTP over TCP only — DTLS (UDP-based TLS) is never
+#             used, so this vulnerability is not reachable in our runtime.
+#             Re-evaluate when a patched version lands in debian:13.
+CVE-2026-33845
