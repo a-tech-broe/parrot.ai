@@ -1,19 +1,14 @@
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from parsers import extract_text
 
 app = FastAPI(title="Parrot AI", description="Listen to any document")
 
-STATIC_DIR = Path(__file__).parent / "static"
-
-
-@app.get("/", include_in_schema=False)
-async def root():
-    return FileResponse(STATIC_DIR / "index.html")
+DIST_DIR = Path(__file__).parent / "dist"
 
 
 @app.post("/api/parse")
@@ -52,4 +47,22 @@ async def parse_document(file: UploadFile = File(...)):
     }
 
 
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+# Serve the built React app (all non-API routes → index.html for SPA routing)
+if DIST_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=str(DIST_DIR / "assets")), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa(full_path: str):
+        index = DIST_DIR / "index.html"
+        return FileResponse(index)
+else:
+    @app.get("/", include_in_schema=False)
+    async def dev_hint():
+        return HTMLResponse(
+            "<h2 style='font-family:monospace;padding:2rem'>"
+            "Frontend not built.<br><br>"
+            "Run <code>cd frontend && npm install && npm run build</code><br>"
+            "or use <code>npm run dev</code> for development (port 5173)."
+            "</h2>",
+            status_code=503,
+        )
