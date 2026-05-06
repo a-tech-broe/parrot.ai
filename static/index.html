@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Parrot — Listen to Any Document</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app">
+
+    <!-- Header -->
+    <header class="header">
+      <div class="header-inner">
+        <a class="logo" href="/">
+          <svg class="logo-bird" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <ellipse cx="18" cy="20" rx="10" ry="11" fill="#00c896"/>
+            <ellipse cx="18" cy="13" rx="7" ry="7" fill="#00c896"/>
+            <ellipse cx="24" cy="10" rx="4" ry="4" fill="#00c896"/>
+            <ellipse cx="14" cy="9" rx="3" ry="3" fill="#00a87a"/>
+            <circle cx="25" cy="9" r="1.5" fill="white"/>
+            <circle cx="25.5" cy="9" r="0.7" fill="#0d1117"/>
+            <path d="M15 16 L12 19 L14 18" fill="#ffd60a" stroke="#ffd60a" stroke-width="0.5"/>
+            <ellipse cx="10" cy="22" rx="4" ry="2.5" fill="#00a87a" transform="rotate(-20 10 22)"/>
+          </svg>
+          <span class="logo-text">parrot</span>
+        </a>
+        <div class="header-right">
+          <span class="badge">beta</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Upload View -->
+    <section id="upload-view" class="view active">
+      <div class="upload-hero">
+        <div class="hero-bird" aria-hidden="true">🦜</div>
+        <h1 class="hero-title">Listen to any document</h1>
+        <p class="hero-subtitle">Upload a file and Parrot reads it aloud — with word-by-word highlighting</p>
+
+        <div class="drop-zone" id="drop-zone">
+          <input type="file" id="file-input" accept=".pdf,.docx,.doc,.txt" hidden>
+          <div class="drop-inner">
+            <svg class="drop-icon" viewBox="0 0 48 48" fill="none">
+              <rect x="8" y="6" width="28" height="36" rx="3" fill="none" stroke="currentColor" stroke-width="2"/>
+              <path d="M30 6v10h10" stroke="currentColor" stroke-width="2" fill="none"/>
+              <path d="M24 20v12M19 27l5 5 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <p class="drop-label">Drag your document here</p>
+            <p class="drop-or">or</p>
+            <button class="btn-browse" id="btn-browse">Browse files</button>
+            <p class="drop-formats">PDF &nbsp;·&nbsp; DOCX &nbsp;·&nbsp; TXT &nbsp;&nbsp;—&nbsp;&nbsp; up to 50 MB</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Reader View -->
+    <section id="reader-view" class="view">
+      <div class="reader-layout">
+
+        <!-- Doc bar -->
+        <div class="doc-bar">
+          <div class="doc-info">
+            <svg class="doc-icon" viewBox="0 0 20 20" fill="none">
+              <rect x="3" y="2" width="12" height="16" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M12 2v5h4" stroke="currentColor" stroke-width="1.5" fill="none"/>
+              <line x1="6" y1="9" x2="14" y2="9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              <line x1="6" y1="12" x2="12" y2="12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            <span class="doc-name" id="doc-name">document.pdf</span>
+            <span class="doc-meta" id="doc-meta">0 words</span>
+          </div>
+          <button class="btn-ghost" id="btn-new-doc">New document</button>
+        </div>
+
+        <!-- Text area -->
+        <div class="text-container">
+          <div class="text-display" id="text-display"></div>
+        </div>
+
+        <!-- Player -->
+        <div class="player">
+          <div class="progress-section">
+            <span class="time-label" id="time-elapsed">0:00</span>
+            <div class="progress-track" id="progress-track">
+              <div class="progress-fill" id="progress-fill"></div>
+              <div class="progress-thumb" id="progress-thumb"></div>
+            </div>
+            <span class="time-label" id="time-total">0:00</span>
+          </div>
+
+          <div class="controls-section">
+            <button class="ctrl-btn" id="btn-skip-back" title="Back 50 words (Alt+←)">
+              <svg viewBox="0 0 24 24" fill="currentColor">
+                <path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/>
+              </svg>
+            </button>
+            <button class="ctrl-btn ctrl-play" id="btn-play" title="Play (Space)">
+              <svg id="play-icon" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M8 5v14l11-7z"/>
+              </svg>
+            </button>
+            <button class="ctrl-btn" id="btn-stop" title="Stop (Esc)">
+              <svg viewBox="0 0 24 24" fill="currentColor">
+                <rect x="6" y="6" width="12" height="12" rx="1"/>
+              </svg>
+            </button>
+            <button class="ctrl-btn" id="btn-skip-fwd" title="Forward 50 words (Alt+→)">
+              <svg viewBox="0 0 24 24" fill="currentColor">
+                <path d="M6 18l8.5-6L6 6v12zm8.5-6V6H17v12h-2.5z"/>
+              </svg>
+            </button>
+          </div>
+
+          <div class="settings-section">
+            <div class="setting-group">
+              <label class="setting-label" for="voice-select">Voice</label>
+              <select class="setting-select" id="voice-select">
+                <option>Loading…</option>
+              </select>
+            </div>
+            <div class="setting-group">
+              <label class="setting-label" for="speed-slider">Speed</label>
+              <div class="speed-wrap">
+                <input type="range" class="speed-slider" id="speed-slider"
+                       min="0.5" max="2.5" step="0.1" value="1.0">
+                <span class="speed-val" id="speed-val">1.0×</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- Loading overlay -->
+    <div class="loading-overlay" id="loading-overlay" hidden>
+      <div class="spinner"></div>
+      <p class="loading-text">Reading your document…</p>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast" id="toast" hidden>
+      <svg viewBox="0 0 20 20" fill="currentColor" class="toast-icon">
+        <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>
+      </svg>
+      <span id="toast-msg"></span>
+    </div>
+
+  </div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
