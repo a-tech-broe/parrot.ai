@@ -372,7 +372,10 @@ jobs:
 
       - name: Trivy — full HTML report
         if: always()
-        uses: aquasecurity/trivy-action@master
+        run: mkdir -p reports
+
+      - uses: aquasecurity/trivy-action@master
+        if: always()
         with:
           image-ref: ${{ steps.meta.outputs.image }}
           format:    template
