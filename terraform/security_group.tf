@@ -30,13 +30,17 @@ resource "aws_security_group" "parrot" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # HTTPS — ECR pulls, AWS API calls, OS package updates
+  # Egress rules require 0.0.0.0/0 — Docker Hub, apt mirrors, and DNS resolve
+  # to dynamic public IPs that cannot be enumerated in advance.
+  #trivy:ignore:AVD-AWS-0104
+
+  # HTTPS — Docker Hub pulls, OS package updates
   egress {
     description = "HTTPS outbound"
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = ["0.0.0.0/0"] #trivy:ignore:AVD-AWS-0104
   }
 
   # HTTP — apt package mirrors
@@ -45,7 +49,7 @@ resource "aws_security_group" "parrot" {
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = ["0.0.0.0/0"] #trivy:ignore:AVD-AWS-0104
   }
 
   # DNS
@@ -54,7 +58,7 @@ resource "aws_security_group" "parrot" {
     from_port   = 53
     to_port     = 53
     protocol    = "udp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = ["0.0.0.0/0"] #trivy:ignore:AVD-AWS-0104
   }
 
   egress {
@@ -62,7 +66,7 @@ resource "aws_security_group" "parrot" {
     from_port   = 53
     to_port     = 53
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = ["0.0.0.0/0"] #trivy:ignore:AVD-AWS-0104
   }
 
   tags = {
