@@ -178,8 +178,8 @@ jobs:
           exit-code: "0"    # warn only; hard-fail below
         continue-on-error: true
 
-      - uses: github/codeql-action/upload-sarif@v3
-        if: always()
+      - uses: github/codeql-action/upload-sarif@v4
+        if: always() && hashFiles('trivy-iac.sarif') != ''
         with:
           sarif_file: trivy-iac.sarif
           category:   terraform-iac
@@ -380,8 +380,8 @@ jobs:
           severity:  CRITICAL,HIGH
           exit-code: "0"
 
-      - uses: github/codeql-action/upload-sarif@v3
-        if: always()
+      - uses: github/codeql-action/upload-sarif@v4
+        if: always() && hashFiles('trivy-container.sarif') != ''
         with:
           sarif_file: trivy-container.sarif
           category:   container-scan
