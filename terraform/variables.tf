@@ -28,10 +28,9 @@ variable "root_volume_size_gb" {
   default     = 30
 }
 
-variable "ssh_public_key" {
-  description = "SSH public key for EC2 access (injected by CI from EC2_SSH_PUBLIC_KEY secret)"
+variable "key_pair_name" {
+  description = "Name of the existing EC2 key pair in the AWS account"
   type        = string
-  sensitive   = true
 }
 
 variable "allowed_ssh_cidrs" {

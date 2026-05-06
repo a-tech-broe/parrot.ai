@@ -1,18 +1,8 @@
-# SSH key pair — public key injected by CI from EC2_SSH_PUBLIC_KEY secret
-resource "aws_key_pair" "deploy" {
-  key_name   = "${var.app_name}-deploy-${var.environment}"
-  public_key = var.ssh_public_key
-
-  tags = {
-    Name = "${var.app_name}-deploy-${var.environment}"
-  }
-}
-
 # EC2 instance
 resource "aws_instance" "parrot" {
   ami                    = data.aws_ami.ubuntu.id
   instance_type          = var.instance_type
-  key_name               = aws_key_pair.deploy.key_name
+  key_name               = var.key_pair_name
   vpc_security_group_ids = [aws_security_group.parrot.id]
   iam_instance_profile   = aws_iam_instance_profile.parrot.name
   subnet_id              = data.aws_subnets.default.ids[0]
