@@ -372,14 +372,18 @@ jobs:
 
       - name: Trivy — full HTML report
         if: always()
-        run: mkdir -p reports
+        run: |
+          mkdir -p reports
+          curl -sfL \
+            https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl \
+            -o reports/html.tpl
 
       - uses: aquasecurity/trivy-action@master
         if: always()
         with:
           image-ref: ${{ steps.meta.outputs.image }}
           format:    template
-          template:  "@/contrib/html.tpl"
+          template:  "@reports/html.tpl"
           output:    reports/trivy-container.html
           severity:  CRITICAL,HIGH,MEDIUM
 
