@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="4" failures="0" errors="0" time="0.487">
+    <testsuite name="src/test/App.test.jsx" timestamp="2026-05-06T21:43:32.600Z" hostname="spaceROCKET.local" tests="4" failures="0" errors="0" skipped="0" time="0.025">
+        <testcase classname="src/test/App.test.jsx" name="App &gt; renders the upload view by default" time="0.017">
+        </testcase>
+        <testcase classname="src/test/App.test.jsx" name="App &gt; shows the browse files button" time="0.003">
+        </testcase>
+        <testcase classname="src/test/App.test.jsx" name="App &gt; displays the Parrot logo text" time="0.003">
+        </testcase>
+        <testcase classname="src/test/App.test.jsx" name="App &gt; shows supported formats in the drop zone" time="0.002">
+        </testcase>
+    </testsuite>
+</testsuites>

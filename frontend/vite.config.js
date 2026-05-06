@@ -11,4 +11,11 @@ export default defineConfig({
     outDir: '../dist',
     emptyOutDir: true,
   },
+  test: {
+    globals: true,
+    environment: 'jsdom',
+    setupFiles: './src/test/setup.js',
+    reporters: ['verbose', 'junit'],
+    outputFile: { junit: './reports/frontend-junit.xml' },
+  },
 })

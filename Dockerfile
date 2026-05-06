@@ -14,6 +14,11 @@ FROM python:3.11-slim AS app
 
 WORKDIR /app
 
+# curl is required for the HEALTHCHECK
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl \
+ && rm -rf /var/lib/apt/lists/*
+
 # Install Python deps first (cached layer)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -23,6 +28,9 @@ COPY main.py parsers.py ./
 
 # Copy built frontend from stage 1
 COPY --from=frontend /app/dist ./dist
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+  CMD curl -sf http://localhost:8000/ || exit 1
 
 EXPOSE 8000
 
