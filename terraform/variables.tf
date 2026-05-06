@@ -39,3 +39,17 @@ variable "allowed_ssh_cidrs" {
   type        = list(string)
   default     = ["0.0.0.0/0"]
 }
+
+variable "tf_state_bucket" {
+  description = "S3 bucket name for Terraform state (injected by CI from TF_STATE_BUCKET secret)"
+  type        = string
+  sensitive   = true
+  default = "bathbucket31"
+}
+
+variable "tf_lock_table" {
+  description = "DynamoDB table name for Terraform state locking (injected by CI from TF_LOCK_TABLE secret)"
+  type        = string
+  sensitive   = true
+  default = "dyning_table"
+}
