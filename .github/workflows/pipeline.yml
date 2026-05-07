@@ -318,12 +318,6 @@ jobs:
           echo "Terraform plan failed — see output above"
           exit 1
 
-      # Save plan binary so apply can reuse it (same pipeline run)
-      - uses: actions/upload-artifact@v4
-        with:
-          name: tfplan
-          path: terraform/tfplan
-          retention-days: 1
 
   # ── 5. Build → Scan → Push ────────────────────────────────────────────────────
   # Runs on every event (build + Trivy scan on PRs too).
@@ -445,7 +439,7 @@ jobs:
 
   # ── 6. Terraform Apply (main only) ────────────────────────────────────────────
   # Runs in PARALLEL with build-scan-push to save wall-clock time.
-  # Downloads the plan artifact produced by terraform-plan.
+  # Re-plans inline (imports first, then fresh plan+apply) so state is never stale.
   # ─────────────────────────────────────────────────────────────────────────────
   terraform-apply:
     name: Terraform Apply
@@ -500,6 +494,19 @@ jobs:
             -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}" \
             -backend-config="region=${{ env.AWS_REGION }}"
 
+      - name: Resolve EC2 key pair name
+        run: |
+          KEY_PAIR="${{ vars.EC2_KEY_PAIR_NAME }}"
+          if [ -z "$KEY_PAIR" ]; then
+            KEY_PAIR=$(aws ec2 describe-key-pairs \
+              --query 'KeyPairs[0].KeyName' --output text 2>/dev/null || true)
+            if [ -z "$KEY_PAIR" ] || [ "$KEY_PAIR" = "None" ]; then
+              echo "::error::No EC2 key pairs found in the AWS account."
+              exit 1
+            fi
+          fi
+          echo "EC2_KEY_PAIR_NAME=$KEY_PAIR" >> "$GITHUB_ENV"
+
       - name: Release stale state lock
         run: |
           STATE_KEY="${{ secrets.TF_STATE_BUCKET }}/parrot/production.tfstate"
@@ -520,16 +527,9 @@ jobs:
             echo "✓ Lock released"
           fi
 
-      # Download plan produced by terraform-plan job
-      - uses: actions/download-artifact@v4
-        with:
-          name: tfplan
-          path: terraform/
-
-      # Import resources that exist in AWS but may be missing from state
-      # (happens when a previous apply was interrupted mid-run).
+      # Import resources that exist in AWS but may be missing from state.
+      # Must run before plan so the plan sees current state and isn't stale at apply.
       - name: Import orphaned resources
-        working-directory: terraform
         run: |
           VPC_ID=$(aws ec2 describe-vpcs \
             --filters "Name=isDefault,Values=true" \
@@ -542,7 +542,10 @@ jobs:
                         "Name=vpc-id,Values=$VPC_ID" \
               --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo "")
             if [ -n "$ID" ] && [ "$ID" != "None" ]; then
-              terraform import "$resource" "$ID" 2>/dev/null \
+              terraform import \
+                -var="key_pair_name=$EC2_KEY_PAIR_NAME" \
+                -var="hosted_zone_id=${{ secrets.HOSTED_ZONE_ID }}" \
+                "$resource" "$ID" 2>/dev/null \
                 && echo "Imported $resource ($ID)" \
                 || echo "$resource already in state"
             fi
@@ -551,19 +554,15 @@ jobs:
           import_sg "parrot-production"     "aws_security_group.parrot"
           import_sg "parrot-alb-production" "aws_security_group.alb"
 
-      # Apply runs in two phases:
-      #   Phase 1 (fast): EC2, ALB, Route53 zone + validation records, ACM cert request
-      #   Phase 2 (blocks): aws_acm_certificate_validation waits ~2 min after
-      #                     maibaaki.com nameservers are delegated to Route53.
-      #
-      # While apply is running, check the job log for "ACTION REQUIRED" below
-      # and update your domain registrar if this is the first deploy.
       - name: Terraform Apply
         run: |
-          terraform apply -auto-approve -lock-timeout=120s tfplan
+          terraform apply \
+            -auto-approve \
+            -lock-timeout=120s \
+            -var="key_pair_name=$EC2_KEY_PAIR_NAME" \
+            -var="hosted_zone_id=${{ secrets.HOSTED_ZONE_ID }}"
 
       - name: Capture outputs
-
         id: tf-output
         run: |
           IP=$(terraform output -raw ec2_public_ip)
