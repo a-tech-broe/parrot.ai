@@ -518,10 +518,6 @@ jobs:
       - name: Terraform Apply
         run: |
           terraform apply -auto-approve -lock-timeout=120s tfplan
-          echo ""
-          echo "::notice::Route53 nameservers (set these at your registrar if not done):"
-          terraform output -json route53_nameservers 2>/dev/null \
-            | tr -d '[]"' | tr ',' '\n' | sed 's/^ */  /' || true
 
       - name: Capture outputs
         id: tf-output

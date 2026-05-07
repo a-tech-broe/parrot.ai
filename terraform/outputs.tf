@@ -18,10 +18,6 @@ output "app_url" {
   value       = "https://${var.domain_name}"
 }
 
-output "route53_nameservers" {
-  description = "Nameservers to set at your domain registrar for maibaaki.com"
-  value       = aws_route53_zone.parrot.name_servers
-}
 
 output "ssh_command" {
   description = "SSH command to connect to the EC2 instance"
