@@ -2,7 +2,7 @@
 
 Listen to any document. Upload a PDF, Word doc, or text file and Parrot reads it aloud with word-by-word highlighting.
 
-**Domain:** [maibaaki.com](https://maibaaki.com)
+**Live at:** [https://maibaaki.com](https://maibaaki.com)
 
 ---
 
@@ -16,6 +16,8 @@ Listen to any document. Upload a PDF, Word doc, or text file and Parrot reads it
 - Estimated reading time
 - Keyboard shortcuts: `Space` play/pause · `Esc` stop · `Alt+←/→` skip
 
+---
+
 ## Stack
 
 | Layer | Technology |
@@ -24,9 +26,13 @@ Listen to any document. Upload a PDF, Word doc, or text file and Parrot reads it
 | Backend | Python 3.11 / FastAPI |
 | TTS | Browser Web Speech API |
 | Document parsing | pdfplumber (PDF) · python-docx (DOCX) |
-| Container | Docker (multi-stage build) |
-| Registry | Amazon ECR |
-| Hosting | AWS EC2 |
+| Container | Docker multi-stage build |
+| Registry | Docker Hub |
+| Compute | AWS EC2 (m5.xlarge, Ubuntu 22.04) |
+| Load balancer | AWS ALB (HTTPS, HTTP→HTTPS redirect) |
+| TLS | AWS ACM certificate |
+| DNS | AWS Route 53 |
+| Infrastructure | Terraform (S3 backend + DynamoDB locking) |
 | CI/CD | GitHub Actions |
 
 ---
@@ -64,67 +70,108 @@ cd frontend && npm test
 
 ## Docker
 
-**Build and run locally:**
 ```bash
-docker compose up --build
+docker build -t parrot .
+docker run -p 8000:8000 parrot
 ```
 
 Open `http://localhost:8000`.
 
 ---
 
-## CI/CD pipeline
+## Infrastructure
 
-Every push to `main` runs the full pipeline automatically. Pull requests run tests and a security scan but do not deploy.
+Infrastructure is managed by Terraform and lives in `terraform/`. A one-time bootstrap creates the S3 state bucket and DynamoDB lock table before the first pipeline run.
 
 ```
-push to main
+terraform/
+├── backend.tf        S3 remote state (partial — config injected by CI)
+├── main.tf           EC2 instance + Elastic IP
+├── alb.tf            Application Load Balancer, listeners, target group
+├── acm.tf            ACM certificate (data source — uses existing cert)
+├── route53.tf        Hosted zone + A alias records for apex and www
+├── iam.tf            EC2 instance role (ECR read + CloudWatch)
+├── security_group.tf EC2 SG (SSH + ALB-only app traffic)
+├── data.tf           Provider, AMI, VPC, subnet data sources
+├── variables.tf      All input variables with defaults
+└── outputs.tf        EC2 IP, ALB DNS, app URL, Route 53 nameservers
+```
+
+**One-time backend bootstrap** (run once before first pipeline execution):
+```bash
+bash scripts/bootstrap-tfstate.sh
+# Prints TF_STATE_BUCKET and TF_LOCK_TABLE values — add both as GitHub secrets
+```
+
+**Stale state lock** (if a pipeline run was killed mid-apply):
+```bash
+cd terraform
+terraform init -backend-config="bucket=<TF_STATE_BUCKET>" \
+               -backend-config="dynamodb_table=parrot-terraform-locks" \
+               -backend-config="region=us-east-1"
+terraform force-unlock <LOCK_ID>
+```
+
+---
+
+## CI/CD pipeline
+
+Every push to `main` runs the full pipeline. Pull requests run tests, security scans, and a Terraform plan (posted as a PR comment) but do not deploy.
+
+```
+PR or push
   │
-  ├── bootstrap-ec2      install Docker + AWS CLI on EC2 (idempotent, parallel)
-  ├── test-backend       pytest — 11 tests
-  ├── test-frontend      Vitest — 4 tests
-  └── scan-dependencies  pip-audit + npm audit
+  ├── test-backend       pytest (unit + integration)
+  ├── test-frontend      Vitest
+  ├── scan-dependencies  pip-audit + npm audit
+  └── terraform-plan     validate + Trivy IaC scan + plan → PR comment
   │
-  build-scan-push
-    ├── create ECR repository (idempotent)
-    ├── build Docker image (layer-cached)
-    ├── Trivy scan → GitHub Security tab (fails on CRITICAL CVEs)
-    └── push :sha + :latest tags to ECR
-  │
-  deploy
-    └── SSH → pull image → replace container → health check → auto-rollback
-  │
-  smoke-test             5 live checks against the running EC2 instance
-  │
-  report                 GitHub Step Summary + Slack notification
+  ╔══ push to main only ═══════════════════════════════════╗
+  ║                                                        ║
+  ║  build-scan-push ──────────────── terraform-apply      ║
+  ║  ├── build Docker image           ├── terraform apply  ║
+  ║  ├── Trivy container scan         ├── provision EC2    ║
+  ║  └── push :sha + :latest          ├── create ALB       ║
+  ║       to Docker Hub               ├── wire Route 53    ║
+  ║                         └── output EC2 IP + ALB DNS    ║
+  ║                                                        ║
+  ║  bootstrap-ec2                                         ║
+  ║  └── install Docker on EC2 (idempotent)                ║
+  ║                                                        ║
+  ║  deploy                                                ║
+  ║  └── SSH → pull image → replace container              ║
+  ║       → health check → auto-rollback on failure        ║
+  ║                                                        ║
+  ║  smoke-test    5 live checks via ALB DNS               ║
+  ║                                                        ║
+  ║  report        GitHub Step Summary + Slack             ║
+  ╚════════════════════════════════════════════════════════╝
 ```
 
 ### GitHub secrets required
 
 | Secret | Description |
 |--------|-------------|
-| `AWS_ACCESS_KEY_ID` | IAM key with ECR push + `ecr:CreateRepository` permissions |
-| `AWS_SECRET_ACCESS_KEY` | IAM secret |
-| `EC2_HOST` | Public IP or hostname of the EC2 instance |
-| `EC2_USERNAME` | SSH user — typically `ubuntu` |
-| `EC2_SSH_KEY` | Full contents of the `.pem` private key |
-| `SLACK_WEBHOOK_URL` | *(optional)* Slack incoming webhook for notifications |
+| `AWS_ACCESS_KEY_ID` | IAM access key (EC2, ALB, ACM, Route 53, S3, DynamoDB) |
+| `AWS_SECRET_ACCESS_KEY` | IAM secret key |
+| `TF_STATE_BUCKET` | S3 bucket name for Terraform state |
+| `TF_LOCK_TABLE` | DynamoDB table name for state locking |
+| `EC2_SSH_KEY` | Private key used by the deploy step to SSH into EC2 |
+| `DOCKERHUB_USERNAME` | Docker Hub username |
+| `DOCKERHUB_TOKEN` | Docker Hub access token |
+| `SLACK_WEBHOOK_URL` | *(optional)* Slack incoming webhook URL |
 
-### GitHub variables (Settings → Variables)
+### GitHub variables (Settings → Variables → Actions)
 
-| Variable | Example |
-|----------|---------|
-| `AWS_REGION` | `us-east-1` |
-| `ECR_REPOSITORY` | `parrot` |
-| `SLACK_NOTIFICATIONS` | `true` |
+| Variable | Example | Description |
+|----------|---------|-------------|
+| `AWS_REGION` | `us-east-1` | AWS region for all resources |
+| `EC2_KEY_PAIR_NAME` | `my-keypair` | *(optional)* Existing EC2 key pair name — auto-discovered if not set |
+| `SLACK_NOTIFICATIONS` | `true` | Enable Slack deploy notifications |
 
-### EC2 prerequisites
+### DNS wiring (one-time, after first apply)
 
-- Ubuntu 22.04 or 24.04
-- Port 22 (SSH) and port 80 (HTTP) open in the security group
-- IAM instance role with `AmazonEC2ContainerRegistryReadOnly` attached
-
-The pipeline bootstraps Docker and the AWS CLI automatically on first run — no manual setup needed on the instance.
+After the first `terraform apply`, check the `route53_nameservers` output in the pipeline summary and update your domain registrar to use those four nameservers for `maibaaki.com`. Route 53 then handles DNS for both the apex and `www` subdomains, pointing them to the ALB.
 
 ---
 
@@ -132,39 +179,40 @@ The pipeline bootstraps Docker and the AWS CLI automatically on first run — no
 
 ```
 parrot.ai/
-├── main.py                  FastAPI app and /api/parse endpoint
-├── parsers.py               PDF, DOCX, TXT text extraction
-├── requirements.txt         Runtime Python dependencies
-├── requirements-dev.txt     Test dependencies
-├── pytest.ini
-├── Dockerfile               Multi-stage: Node builds React → Python serves it
-├── docker-compose.yml       Single-service production compose
+├── main.py                    FastAPI app + /api/parse endpoint
+├── parsers.py                 PDF, DOCX, TXT text extraction
+├── requirements.txt           Runtime Python dependencies
+├── requirements-dev.txt       Test dependencies
+├── Dockerfile                 Multi-stage: Node builds React → Python serves
+├── .trivyignore               Suppressed CVEs (documented justification)
 ├── frontend/
 │   ├── src/
 │   │   ├── App.jsx
 │   │   ├── hooks/useSpeech.js
 │   │   └── components/
 │   │       ├── UploadZone.jsx
-│   │       ├── Reader.jsx
 │   │       ├── TextDisplay.jsx
 │   │       └── Player.jsx
-│   └── src/test/            Vitest test suite
+│   └── src/test/              Vitest suite
 ├── tests/
-│   ├── test_api.py          FastAPI endpoint tests
-│   ├── test_parsers.py      Parser unit tests
-│   └── smoke/smoke_test.py  Live smoke tests (run post-deploy)
+│   ├── test_api.py            FastAPI endpoint tests
+│   ├── test_parsers.py        Parser unit tests
+│   └── smoke/smoke_test.py    Live smoke tests (post-deploy, targets ALB)
+├── terraform/                 All infrastructure-as-code
 ├── scripts/
-│   └── ec2-setup.sh         Manual EC2 bootstrap (also run by pipeline)
+│   └── bootstrap-tfstate.sh   One-time S3 + DynamoDB state backend setup
 └── .github/
-    └── workflows/ci-cd.yml  Full CI/CD pipeline
+    └── workflows/pipeline.yml Full CI/CD pipeline
 ```
+
+---
 
 ## API
 
 `POST /api/parse` — upload a document, receive extracted plain text.
 
 ```bash
-curl -X POST http://localhost:8000/api/parse \
+curl -X POST https://maibaaki.com/api/parse \
   -F "file=@document.pdf"
 ```
 
