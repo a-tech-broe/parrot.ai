@@ -184,6 +184,26 @@ jobs:
             -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}" \
             -backend-config="region=${{ env.AWS_REGION }}"
 
+      - name: Release stale state lock
+        run: |
+          STATE_KEY="${{ secrets.TF_STATE_BUCKET }}/parrot/production.tfstate"
+          ITEM=$(aws dynamodb get-item \
+            --table-name "${{ secrets.TF_LOCK_TABLE }}" \
+            --key "{\"LockID\":{\"S\":\"$STATE_KEY\"}}" \
+            --query 'Item.Info.S' \
+            --output text 2>/dev/null || echo "")
+          if [ -z "$ITEM" ] || [ "$ITEM" = "None" ]; then
+            echo "No state lock present ✓"
+            exit 0
+          fi
+          LOCK_ID=$(echo "$ITEM" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['ID'])" 2>/dev/null || echo "")
+          if [ -n "$LOCK_ID" ]; then
+            echo "Stale lock detected (ID: $LOCK_ID) — releasing..."
+            terraform force-unlock -force "$LOCK_ID"
+            echo "✓ Lock released"
+          fi
+
       - name: Terraform Format check
         id: fmt
         run: terraform fmt -check -recursive -no-color
@@ -476,6 +496,26 @@ jobs:
             -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
             -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}" \
             -backend-config="region=${{ env.AWS_REGION }}"
+
+      - name: Release stale state lock
+        run: |
+          STATE_KEY="${{ secrets.TF_STATE_BUCKET }}/parrot/production.tfstate"
+          ITEM=$(aws dynamodb get-item \
+            --table-name "${{ secrets.TF_LOCK_TABLE }}" \
+            --key "{\"LockID\":{\"S\":\"$STATE_KEY\"}}" \
+            --query 'Item.Info.S' \
+            --output text 2>/dev/null || echo "")
+          if [ -z "$ITEM" ] || [ "$ITEM" = "None" ]; then
+            echo "No state lock present ✓"
+            exit 0
+          fi
+          LOCK_ID=$(echo "$ITEM" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['ID'])" 2>/dev/null || echo "")
+          if [ -n "$LOCK_ID" ]; then
+            echo "Stale lock detected (ID: $LOCK_ID) — releasing..."
+            terraform force-unlock -force "$LOCK_ID"
+            echo "✓ Lock released"
+          fi
 
       # Download plan produced by terraform-plan job
       - uses: actions/download-artifact@v4
