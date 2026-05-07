@@ -228,6 +228,7 @@ jobs:
           terraform plan \
             -no-color \
             -out=tfplan \
+            -lock-timeout=120s \
             -var="key_pair_name=$EC2_KEY_PAIR_NAME"
         continue-on-error: true   # we handle failure explicitly below
 
@@ -429,6 +430,7 @@ jobs:
     needs: [test-backend, test-frontend, scan-dependencies, terraform-plan]
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 60   # ACM DNS validation can take up to 45 min on first deploy
     environment:
       name: production
     outputs:
@@ -481,8 +483,20 @@ jobs:
           name: tfplan
           path: terraform/
 
+      # Apply runs in two phases:
+      #   Phase 1 (fast): EC2, ALB, Route53 zone + validation records, ACM cert request
+      #   Phase 2 (blocks): aws_acm_certificate_validation waits ~2 min after
+      #                     maibaaki.com nameservers are delegated to Route53.
+      #
+      # While apply is running, check the job log for "ACTION REQUIRED" below
+      # and update your domain registrar if this is the first deploy.
       - name: Terraform Apply
-        run: terraform apply -auto-approve tfplan
+        run: |
+          terraform apply -auto-approve -lock-timeout=120s tfplan
+          echo ""
+          echo "::notice::Route53 nameservers (set these at your registrar if not done):"
+          terraform output -json route53_nameservers 2>/dev/null \
+            | tr -d '[]"' | tr ',' '\n' | sed 's/^ */  /' || true
 
       - name: Capture outputs
         id: tf-output
