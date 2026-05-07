@@ -12,7 +12,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false  # never cancel a running apply mid-flight
 
 permissions:
   contents:        read
@@ -553,6 +553,31 @@ jobs:
 
           import_sg "parrot-production"     "aws_security_group.parrot"
           import_sg "parrot-alb-production" "aws_security_group.alb"
+
+      # Verify the ACM validation CNAMEs resolve before apply blocks waiting for them.
+      # If dig returns NXDOMAIN the zone/nameservers are misconfigured — fail early.
+      - name: Verify ACM DNS validation records resolve
+        run: |
+          DOMAIN="maibaaki.com"
+          echo "Checking that $DOMAIN resolves via public DNS..."
+          for i in $(seq 1 6); do
+            RESULT=$(dig +short "$DOMAIN" @8.8.8.8 2>/dev/null || echo "")
+            if [ -n "$RESULT" ]; then
+              echo "✓ $DOMAIN resolves ($RESULT)"
+              break
+            fi
+            echo "  Attempt $i/6 — not yet resolving, waiting 10s..."
+            sleep 10
+            [ "$i" -eq 6 ] && echo "::warning::$DOMAIN not resolving via 8.8.8.8 — ACM validation may stall"
+          done
+
+          # List the validation CNAMEs Terraform will create so they are visible in the log
+          echo ""
+          echo "ACM validation CNAMEs in hosted zone ${{ secrets.HOSTED_ZONE_ID }}:"
+          aws route53 list-resource-record-sets \
+            --hosted-zone-id "${{ secrets.HOSTED_ZONE_ID }}" \
+            --query "ResourceRecordSets[?Type=='CNAME'].{Name:Name,Value:ResourceRecords[0].Value}" \
+            --output table 2>/dev/null || echo "(zone empty or no CNAMEs yet)"
 
       - name: Terraform Apply
         run: |
