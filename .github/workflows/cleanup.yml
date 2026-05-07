@@ -1,0 +1,243 @@
+name: Cleanup
+
+# ── Trigger ────────────────────────────────────────────────────────────────────
+# Manual only. Choose a target and, for destructive targets, type "destroy".
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "What to clean up"
+        required: true
+        type: choice
+        options:
+          - state          # fix Terraform state (stale locks + orphaned entries)
+          - docker-images  # prune old Docker Hub tags, keep last 10
+          - infrastructure # terraform destroy — tears down ALL AWS resources
+      confirm:
+        description: 'For infrastructure: type "destroy" to confirm teardown'
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION:  ${{ vars.AWS_REGION || 'us-east-1' }}
+  TF_VERSION:  "1.9.8"
+  TF_IN_AUTOMATION: "true"
+
+# ──────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ── Guard ─────────────────────────────────────────────────────────────────────
+  # Blocks the infrastructure job unless the user typed "destroy".
+  guard:
+    name: Confirm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check confirmation
+        if: inputs.target == 'infrastructure'
+        run: |
+          if [ "${{ inputs.confirm }}" != "destroy" ]; then
+            echo "::error::Infrastructure teardown requires confirm = \"destroy\". Got: \"${{ inputs.confirm }}\""
+            exit 1
+          fi
+          echo "Confirmation accepted — proceeding with terraform destroy"
+
+  # ── 1. Fix Terraform state ────────────────────────────────────────────────────
+  cleanup-state:
+    name: Fix Terraform State
+    needs: guard
+    if: inputs.target == 'state' || inputs.target == 'infrastructure'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+
+      - name: Release stale state lock
+        run: |
+          STATE_KEY="${{ secrets.TF_STATE_BUCKET }}/parrot/production.tfstate"
+          ITEM=$(aws dynamodb get-item \
+            --table-name "${{ secrets.TF_LOCK_TABLE }}" \
+            --key "{\"LockID\":{\"S\":\"$STATE_KEY\"}}" \
+            --query 'Item.Info.S' --output text 2>/dev/null || echo "")
+          if [ -z "$ITEM" ] || [ "$ITEM" = "None" ]; then
+            echo "No state lock present ✓"
+            exit 0
+          fi
+          LOCK_ID=$(echo "$ITEM" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['ID'])" 2>/dev/null || echo "")
+          if [ -n "$LOCK_ID" ]; then
+            echo "Stale lock (ID: $LOCK_ID) — releasing..."
+            terraform force-unlock -force "$LOCK_ID"
+            echo "✓ Lock released"
+          fi
+
+      - name: Remove stale state entries
+        run: |
+          set -euo pipefail
+          stale_resources=(
+            aws_route53_zone.parrot
+          )
+          for resource in "${stale_resources[@]}"; do
+            if terraform state show "$resource" > /dev/null 2>&1; then
+              echo "Removing $resource from state..."
+              terraform state rm "$resource"
+              echo "✓ Removed $resource"
+            else
+              echo "$resource not in state ✓"
+            fi
+          done
+
+      - name: Print current state
+        run: |
+          echo "── Managed resources ──"
+          terraform state list || echo "(state is empty)"
+
+  # ── 2. Prune Docker Hub image tags ────────────────────────────────────────────
+  cleanup-docker:
+    name: Prune Docker Hub Tags
+    needs: guard
+    if: inputs.target == 'docker-images'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Delete old tags (keep newest 10)
+        env:
+          HUB_USER:  ${{ secrets.DOCKERHUB_USERNAME }}
+          HUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          KEEP:      10
+        run: |
+          set -euo pipefail
+
+          REPO="$HUB_USER/parrot"
+          echo "Fetching tags for $REPO ..."
+
+          # Get a Hub JWT
+          JWT=$(curl -sf \
+            -H "Content-Type: application/json" \
+            -d "{\"username\":\"$HUB_USER\",\"password\":\"$HUB_TOKEN\"}" \
+            https://hub.docker.com/v2/users/login \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+          # Fetch all tags sorted by last_updated desc
+          TAGS=$(curl -sf \
+            -H "Authorization: Bearer $JWT" \
+            "https://hub.docker.com/v2/repositories/$REPO/tags/?page_size=100&ordering=-last_updated" \
+            | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          tags = [t['name'] for t in data.get('results', [])]
+          print('\n'.join(tags))
+          ")
+
+          TOTAL=$(echo "$TAGS" | wc -l | tr -d ' ')
+          echo "Found $TOTAL tags"
+
+          if [ "$TOTAL" -le "$KEEP" ]; then
+            echo "Nothing to prune ($TOTAL tags, keeping $KEEP) ✓"
+            exit 0
+          fi
+
+          TO_DELETE=$(echo "$TAGS" | tail -n +"$((KEEP + 1))")
+          echo "Deleting $((TOTAL - KEEP)) old tag(s):"
+          echo "$TO_DELETE"
+
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            STATUS=$(curl -sf -o /dev/null -w '%{http_code}' \
+              -X DELETE \
+              -H "Authorization: Bearer $JWT" \
+              "https://hub.docker.com/v2/repositories/$REPO/tags/$tag/" || echo "000")
+            if [ "$STATUS" = "204" ]; then
+              echo "  ✓ Deleted $tag"
+            else
+              echo "  ✗ Failed to delete $tag (HTTP $STATUS)"
+            fi
+          done <<< "$TO_DELETE"
+
+          echo "Done — $KEEP most recent tags retained"
+
+  # ── 3. Terraform Destroy ──────────────────────────────────────────────────────
+  destroy-infrastructure:
+    name: Terraform Destroy
+    needs: [guard, cleanup-state]
+    if: inputs.target == 'infrastructure' && inputs.confirm == 'destroy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: production
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+
+      - name: Resolve EC2 key pair name
+        run: |
+          KEY_PAIR="${{ vars.EC2_KEY_PAIR_NAME }}"
+          if [ -z "$KEY_PAIR" ]; then
+            KEY_PAIR=$(aws ec2 describe-key-pairs \
+              --query 'KeyPairs[0].KeyName' --output text 2>/dev/null || true)
+          fi
+          echo "EC2_KEY_PAIR_NAME=${KEY_PAIR:-none}" >> "$GITHUB_ENV"
+
+      - name: Terraform Destroy
+        run: |
+          terraform destroy \
+            -auto-approve \
+            -lock-timeout=120s \
+            -var="key_pair_name=$EC2_KEY_PAIR_NAME" \
+            -var="hosted_zone_id=${{ secrets.HOSTED_ZONE_ID }}"
+
+      - name: Write summary
+        if: always()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" << 'EOF'
+          ## Terraform Destroy complete
+
+          All managed AWS resources have been removed.
+          To redeploy, push to `main` or trigger the pipeline manually.
+          EOF
