@@ -56,14 +56,11 @@ export default function App() {
         <div className="header-inner">
           <a className="logo" href="/">
             <svg className="logo-bird" viewBox="0 0 36 36" fill="none">
-              <ellipse cx="18" cy="20" rx="10" ry="11" fill="#00c896"/>
-              <ellipse cx="18" cy="13" rx="7" ry="7" fill="#00c896"/>
-              <ellipse cx="24" cy="10" rx="4" ry="4" fill="#00c896"/>
-              <ellipse cx="14" cy="9" rx="3" ry="3" fill="#00a87a"/>
-              <circle cx="25" cy="9" r="1.5" fill="white"/>
-              <circle cx="25.5" cy="9" r="0.7" fill="#0d1117"/>
-              <path d="M15 16 L12 19 L14 18" fill="#ffd60a" stroke="#ffd60a" strokeWidth="0.5"/>
-              <ellipse cx="10" cy="22" rx="4" ry="2.5" fill="#00a87a" transform="rotate(-20 10 22)"/>
+              <rect x="5"  y="14" width="3" height="8"  rx="1.5" fill="#00c896"/>
+              <rect x="11" y="10" width="3" height="16" rx="1.5" fill="#00c896"/>
+              <rect x="17" y="7"  width="3" height="22" rx="1.5" fill="#00c896"/>
+              <rect x="23" y="10" width="3" height="16" rx="1.5" fill="#00c896"/>
+              <rect x="29" y="14" width="3" height="8"  rx="1.5" fill="#00c896"/>
             </svg>
             <span className="logo-text">maibaaki — parrot</span>
           </a>
