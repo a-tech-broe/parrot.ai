@@ -1,9 +1,9 @@
 resource "aws_security_group" "parrot" {
   name        = "${var.app_name}-${var.environment}"
-  description = "Parrot application - HTTP + SSH ingress"
+  description = "${var.app_name} EC2 - SSH ingress and ALB-routed app traffic"
   vpc_id      = data.aws_vpc.default.id
 
-  # SSH
+  # SSH — restricted by allowed_ssh_cidrs variable
   ingress {
     description = "SSH"
     from_port   = 22
@@ -12,29 +12,12 @@ resource "aws_security_group" "parrot" {
     cidr_blocks = var.allowed_ssh_cidrs
   }
 
-  # HTTP
-  ingress {
-    description = "HTTP"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  # Port 8000 ingress from ALB is added as a separate aws_security_group_rule
+  # in alb.tf to avoid a circular dependency between the two SG resources.
 
-  # HTTPS (reserved for future TLS termination)
-  ingress {
-    description = "HTTPS"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  # Egress — Docker Hub pulls, apt mirrors, DNS
+  # 0.0.0.0/0 required: these services use dynamic public IPs.
 
-  # Egress rules require 0.0.0.0/0 — Docker Hub, apt mirrors, and DNS resolve
-  # to dynamic public IPs that cannot be enumerated in advance.
-  #trivy:ignore:AVD-AWS-0104
-
-  # HTTPS — Docker Hub pulls, OS package updates
   egress {
     description = "HTTPS outbound"
     from_port   = 443
@@ -43,7 +26,6 @@ resource "aws_security_group" "parrot" {
     cidr_blocks = ["0.0.0.0/0"] #trivy:ignore:AVD-AWS-0104
   }
 
-  # HTTP — apt package mirrors
   egress {
     description = "HTTP outbound"
     from_port   = 80
@@ -52,7 +34,6 @@ resource "aws_security_group" "parrot" {
     cidr_blocks = ["0.0.0.0/0"] #trivy:ignore:AVD-AWS-0104
   }
 
-  # DNS
   egress {
     description = "DNS UDP"
     from_port   = 53
