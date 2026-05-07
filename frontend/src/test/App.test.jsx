@@ -15,7 +15,7 @@ describe('App', () => {
 
   it('displays the Parrot logo text', () => {
     render(<App />)
-    expect(screen.getByText('parrot')).toBeDefined()
+    expect(screen.getByText('maibaaki — parrot')).toBeDefined()
   })
 
   it('shows supported formats in the drop zone', () => {

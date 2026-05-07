@@ -65,7 +65,7 @@ export default function App() {
               <path d="M15 16 L12 19 L14 18" fill="#ffd60a" stroke="#ffd60a" strokeWidth="0.5"/>
               <ellipse cx="10" cy="22" rx="4" ry="2.5" fill="#00a87a" transform="rotate(-20 10 22)"/>
             </svg>
-            <span className="logo-text">parrot</span>
+            <span className="logo-text">maibaaki — parrot</span>
           </a>
           <span className="badge">beta</span>
         </div>
