@@ -6,7 +6,7 @@ provider "aws" {
       Project     = var.app_name
       Environment = var.environment
       ManagedBy   = "terraform"
-      Domain      = "maibaaki.com"
+      Domain      = var.domain_name
     }
   }
 }
