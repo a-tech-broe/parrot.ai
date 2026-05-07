@@ -228,6 +228,7 @@ jobs:
           terraform plan \
             -no-color \
             -out=tfplan \
+            -lock-timeout=120s \
             -var="key_pair_name=$EC2_KEY_PAIR_NAME"
         continue-on-error: true   # we handle failure explicitly below
 
@@ -482,7 +483,7 @@ jobs:
           path: terraform/
 
       - name: Terraform Apply
-        run: terraform apply -auto-approve tfplan
+        run: terraform apply -auto-approve -lock-timeout=120s tfplan
 
       - name: Capture outputs
         id: tf-output
