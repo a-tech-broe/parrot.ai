@@ -483,6 +483,31 @@ jobs:
           name: tfplan
           path: terraform/
 
+      # Import resources that exist in AWS but may be missing from state
+      # (happens when a previous apply was interrupted mid-run).
+      - name: Import orphaned resources
+        working-directory: terraform
+        run: |
+          VPC_ID=$(aws ec2 describe-vpcs \
+            --filters "Name=isDefault,Values=true" \
+            --query 'Vpcs[0].VpcId' --output text)
+
+          import_sg() {
+            local name=$1 resource=$2
+            ID=$(aws ec2 describe-security-groups \
+              --filters "Name=group-name,Values=$name" \
+                        "Name=vpc-id,Values=$VPC_ID" \
+              --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo "")
+            if [ -n "$ID" ] && [ "$ID" != "None" ]; then
+              terraform import "$resource" "$ID" 2>/dev/null \
+                && echo "Imported $resource ($ID)" \
+                || echo "$resource already in state"
+            fi
+          }
+
+          import_sg "parrot-production"     "aws_security_group.parrot"
+          import_sg "parrot-alb-production" "aws_security_group.alb"
+
       # Apply runs in two phases:
       #   Phase 1 (fast): EC2, ALB, Route53 zone + validation records, ACM cert request
       #   Phase 2 (blocks): aws_acm_certificate_validation waits ~2 min after
