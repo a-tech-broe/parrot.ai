@@ -38,3 +38,9 @@ variable "allowed_ssh_cidrs" {
   type        = list(string)
   default     = ["0.0.0.0/0"]
 }
+
+variable "domain_name" {
+  description = "Primary domain name served by the ALB (e.g. maibaaki.com)"
+  type        = string
+  default     = "maibaaki.com"
+}
