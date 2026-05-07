@@ -529,6 +529,18 @@ jobs:
           echo "EC2 public IP : $IP"
           echo "ALB DNS       : $ALB"
 
+      # Auto-delegate the Route 53 registered domain to the Terraform zone.
+      # Route 53 Domains API is always in us-east-1 regardless of AWS_REGION.
+      - name: Delegate domain to hosted zone
+        run: |
+          NS_JSON=$(terraform output -json route53_nameservers \
+            | jq '[.[] | {"Name": .}]')
+          aws route53domains update-domain-nameservers \
+            --region us-east-1 \
+            --domain-name "${{ vars.DOMAIN_NAME || 'maibaaki.com' }}" \
+            --nameservers "$NS_JSON"
+          echo "✓ Domain nameservers updated — ACM validation will complete shortly"
+
       - name: Terraform output summary
         run: terraform output
 
