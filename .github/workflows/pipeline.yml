@@ -563,18 +563,20 @@ jobs:
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         env:
-          IMAGE:             ${{ needs.build-scan-push.outputs.image }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN:    ${{ secrets.DOCKERHUB_TOKEN }}
+          GIT_SHA:            ${{ github.sha }}
         with:
           host:     ${{ needs.terraform-apply.outputs.ec2_ip }}
           username: ubuntu
           key:      ${{ secrets.EC2_SSH_KEY }}
           port:     22
-          envs:     IMAGE,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN
+          envs:     DOCKERHUB_USERNAME,DOCKERHUB_TOKEN,GIT_SHA
           timeout:  180s
           script: |
             set -euo pipefail
+
+            IMAGE="$DOCKERHUB_USERNAME/parrot:$GIT_SHA"
 
             echo "=== Authenticating to Docker Hub ==="
             echo "$DOCKERHUB_TOKEN" \
