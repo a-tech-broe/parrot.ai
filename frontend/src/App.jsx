@@ -55,14 +55,14 @@ export default function App() {
       <header className="header">
         <div className="header-inner">
           <a className="logo" href="/">
-            <svg className="logo-bird" viewBox="0 0 36 36" fill="none">
+            <svg className={speech.speechState === 'playing' ? 'logo-bird playing' : 'logo-bird'} viewBox="0 0 36 36" fill="none">
               <rect x="5"  y="14" width="3" height="8"  rx="1.5" fill="#00c896"/>
               <rect x="11" y="10" width="3" height="16" rx="1.5" fill="#00c896"/>
               <rect x="17" y="7"  width="3" height="22" rx="1.5" fill="#00c896"/>
               <rect x="23" y="10" width="3" height="16" rx="1.5" fill="#00c896"/>
               <rect x="29" y="14" width="3" height="8"  rx="1.5" fill="#00c896"/>
             </svg>
-            <span className="logo-text">maibaaki — parrot</span>
+            <span className="logo-text">parrot maibaaki</span>
           </a>
           <span className="badge">beta</span>
         </div>

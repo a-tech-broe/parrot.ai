@@ -495,3 +495,202 @@ select { font-family: inherit; }
   .speed-slider { width: 70px; }
   .doc-name     { max-width: 160px; }
 }
+
+/* ── Waveform animations ──────────────────────────────── */
+@keyframes bar-breathe {
+  0%, 100% { transform: scaleY(1); }
+  50%       { transform: scaleY(0.35); }
+}
+@keyframes bar-dance {
+  0%   { transform: scaleY(0.25); }
+  100% { transform: scaleY(1); }
+}
+
+/* Logo bars — gentle idle breathe */
+.logo-bird rect {
+  transform-origin: 50% 100%;
+  animation: bar-breathe 2.6s ease-in-out infinite;
+}
+.logo-bird rect:nth-child(1) { animation-delay: 0s;    animation-duration: 2.6s; }
+.logo-bird rect:nth-child(2) { animation-delay: 0.35s; animation-duration: 2.2s; }
+.logo-bird rect:nth-child(3) { animation-delay: 0.1s;  animation-duration: 1.9s; }
+.logo-bird rect:nth-child(4) { animation-delay: 0.5s;  animation-duration: 2.4s; }
+.logo-bird rect:nth-child(5) { animation-delay: 0.2s;  animation-duration: 2.8s; }
+
+/* Logo bars — active dance when playing */
+.logo-bird.playing rect {
+  animation: bar-dance 0.45s ease-in-out infinite alternate;
+}
+.logo-bird.playing rect:nth-child(1) { animation-duration: 0.52s; animation-delay: 0s; }
+.logo-bird.playing rect:nth-child(2) { animation-duration: 0.38s; animation-delay: 0.08s; }
+.logo-bird.playing rect:nth-child(3) { animation-duration: 0.3s;  animation-delay: 0.04s; }
+.logo-bird.playing rect:nth-child(4) { animation-duration: 0.44s; animation-delay: 0.12s; }
+.logo-bird.playing rect:nth-child(5) { animation-duration: 0.36s; animation-delay: 0.06s; }
+
+/* ── Hero waveform ────────────────────────────────────── */
+.hero-wave {
+  width: 180px;
+  height: 72px;
+  margin-bottom: 24px;
+  filter: drop-shadow(0 0 18px rgba(0,200,150,0.35));
+}
+
+.hero-wave rect {
+  transform-origin: 50% 100%;
+  animation: bar-breathe 2.4s ease-in-out infinite;
+}
+.hero-wave rect:nth-child(1) { animation-delay: 0s;    animation-duration: 2.8s; }
+.hero-wave rect:nth-child(2) { animation-delay: 0.2s;  animation-duration: 2.3s; }
+.hero-wave rect:nth-child(3) { animation-delay: 0.4s;  animation-duration: 1.9s; }
+.hero-wave rect:nth-child(4) { animation-delay: 0.1s;  animation-duration: 2.1s; }
+.hero-wave rect:nth-child(5) { animation-delay: 0.35s; animation-duration: 2.5s; }
+.hero-wave rect:nth-child(6) { animation-delay: 0.15s; animation-duration: 2.0s; }
+.hero-wave rect:nth-child(7) { animation-delay: 0.45s; animation-duration: 2.2s; }
+.hero-wave rect:nth-child(8) { animation-delay: 0.25s; animation-duration: 2.6s; }
+.hero-wave rect:nth-child(9) { animation-delay: 0.05s; animation-duration: 3.0s; }
+
+/* ── Upload hero entry animation ──────────────────────── */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.upload-hero {
+  animation: fade-up 0.45s ease both;
+}
+
+.upload-hero .hero-wave    { animation-delay: 0s; }
+.upload-hero .hero-title   { animation: fade-up 0.45s 0.08s ease both; }
+.upload-hero .hero-subtitle{ animation: fade-up 0.45s 0.15s ease both; }
+.upload-hero .drop-zone    { animation: fade-up 0.45s 0.22s ease both; }
+.upload-hero .features     { animation: fade-up 0.45s 0.3s ease both; }
+
+/* ── Drop zone — animated border on hover ─────────────── */
+.drop-zone {
+  position: relative;
+}
+.drop-zone::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, var(--primary), transparent 60%);
+  opacity: 0;
+  transition: opacity 0.3s;
+  pointer-events: none;
+  z-index: -1;
+}
+.drop-zone:hover::after,
+.drop-zone.drag-over::after { opacity: 0.18; }
+
+.drop-zone.drag-over {
+  box-shadow: 0 0 0 2px var(--primary), 0 0 32px rgba(0,200,150,0.2);
+}
+
+/* ── Feature cards ────────────────────────────────────── */
+.features {
+  display: flex;
+  gap: 12px;
+  margin-top: 24px;
+  width: 100%;
+}
+
+.feature-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 6px;
+  padding: 16px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: border-color 0.2s, background 0.2s, transform 0.15s;
+  cursor: default;
+}
+
+.feature-card:hover {
+  border-color: var(--primary);
+  background: rgba(0,200,150,0.05);
+  transform: translateY(-2px);
+}
+
+.feature-icon {
+  width: 28px;
+  height: 28px;
+  color: var(--primary);
+  margin-bottom: 2px;
+}
+
+.feature-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.feature-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+/* ── Live waveform in player ──────────────────────────── */
+@keyframes wave-bar {
+  0%, 100% { transform: scaleY(0.2); }
+  50%       { transform: scaleY(1); }
+}
+
+.live-wave {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 24px;
+  opacity: 0.25;
+  transition: opacity 0.3s;
+}
+
+.live-wave.active {
+  opacity: 1;
+}
+
+.live-wave span {
+  display: block;
+  width: 3px;
+  height: 16px;
+  background: var(--primary);
+  border-radius: 2px;
+  transform: scaleY(0.2);
+  transform-origin: 50% 50%;
+}
+
+.live-wave.active span {
+  animation: wave-bar 0.7s ease-in-out infinite;
+}
+
+.live-wave span:nth-child(1) { animation-delay: 0s;    height: 10px; }
+.live-wave span:nth-child(2) { animation-delay: 0.15s; height: 18px; }
+.live-wave span:nth-child(3) { animation-delay: 0.05s; height: 22px; }
+.live-wave span:nth-child(4) { animation-delay: 0.2s;  height: 18px; }
+.live-wave span:nth-child(5) { animation-delay: 0.1s;  height: 10px; }
+
+/* ── Player playing state ─────────────────────────────── */
+.player[data-state="playing"] .progress-fill {
+  box-shadow: 0 0 8px rgba(0,200,150,0.6);
+}
+
+.player[data-state="playing"] .ctrl-play {
+  box-shadow: 0 0 0 6px rgba(0,200,150,0.15), 0 0 20px rgba(0,200,150,0.2);
+}
+
+.player[data-state="playing"] .progress-track {
+  height: 5px;
+}
+
+/* ── Responsive additions ─────────────────────────────── */
+@media (max-width: 600px) {
+  .features { flex-direction: column; gap: 8px; }
+  .feature-card { flex-direction: row; text-align: left; gap: 12px; padding: 12px; }
+  .hero-wave { width: 140px; height: 56px; }
+  .live-wave { display: none; }
+}
