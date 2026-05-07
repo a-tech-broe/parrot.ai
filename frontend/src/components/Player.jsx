@@ -52,7 +52,7 @@ export function Player({ speech, wordCount }) {
   const selectedIdx = voices.indexOf(selectedVoice)
 
   return (
-    <div className="player">
+    <div className="player" data-state={speechState}>
       {/* Progress */}
       <div className="progress-section">
         <span className="time-label">{fmt(elapsed)}</span>
@@ -69,6 +69,10 @@ export function Player({ speech, wordCount }) {
           <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
         </button>
 
+        <div className={`live-wave${speechState === 'playing' ? ' active' : ''}`} aria-hidden="true">
+          <span/><span/><span/><span/><span/>
+        </div>
+
         <button
           className="ctrl-btn ctrl-play"
           title={speechState === 'playing' ? 'Pause (Space)' : 'Play (Space)'}
@@ -83,6 +87,10 @@ export function Player({ speech, wordCount }) {
         <button className="ctrl-btn" title="Stop (Esc)" onClick={stop}>
           <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
         </button>
+
+        <div className={`live-wave${speechState === 'playing' ? ' active' : ''}`} aria-hidden="true">
+          <span/><span/><span/><span/><span/>
+        </div>
 
         <button className="ctrl-btn" title="Forward 50 words (Alt+→)" onClick={() => skip(+50)}>
           <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zm8.5-6V6H17v12h-2.5z"/></svg>
