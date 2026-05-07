@@ -6,7 +6,7 @@ resource "aws_route53_zone" "parrot" {
 
 # Apex: maibaaki.com → ALB
 resource "aws_route53_record" "apex" {
-  zone_id         = aws_route53_zone.parrot.zone_id
+  zone_id         = data.aws_route53_zone.parrot.zone_id
   name            = var.domain_name
   type            = "A"
   allow_overwrite = true
@@ -20,7 +20,7 @@ resource "aws_route53_record" "apex" {
 
 # www.maibaaki.com → ALB
 resource "aws_route53_record" "www" {
-  zone_id         = aws_route53_zone.parrot.zone_id
+  zone_id         = data.aws_route53_zone.parrot.zone_id
   name            = "www.${var.domain_name}"
   type            = "A"
   allow_overwrite = true
