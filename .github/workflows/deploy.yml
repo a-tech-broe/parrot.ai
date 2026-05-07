@@ -1,0 +1,204 @@
+name: Deploy
+
+# ── Trigger ────────────────────────────────────────────────────────────────────
+# Manual deploy — builds, scans, pushes and deploys the current main branch
+# without requiring Terraform to run. Use this when infra is already up.
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Git SHA to deploy (leave blank for HEAD of main)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  security-events: write
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+jobs:
+
+  # ── 1. Build → Scan → Push ────────────────────────────────────────────────────
+  build-scan-push:
+    name: Build · Scan · Push
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha || github.ref }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-buildx-
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Compute image tag
+        id: meta
+        run: |
+          SHA="${{ inputs.sha || github.sha }}"
+          IMAGE="${{ secrets.DOCKERHUB_USERNAME }}/parrot:${SHA:0:40}"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "Building $IMAGE"
+
+      - name: Build image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.image }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to:   type=local,dest=/tmp/.buildx-cache-new,mode=max
+
+      - name: Rotate build cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+      - name: Trivy scan — fail on CRITICAL
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}
+          format:    table
+          severity:  CRITICAL
+          exit-code: "1"
+
+      - name: Push to Docker Hub
+        run: |
+          IMAGE="${{ steps.meta.outputs.image }}"
+          docker push "$IMAGE"
+          docker tag  "$IMAGE" "${{ secrets.DOCKERHUB_USERNAME }}/parrot:latest"
+          docker push "${{ secrets.DOCKERHUB_USERNAME }}/parrot:latest"
+          echo "Pushed $IMAGE ✓"
+
+  # ── 2. Deploy to EC2 ──────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to EC2
+    needs: build-scan-push
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Resolve EC2 public IP
+        id: ec2
+        run: |
+          # Try EC2_HOST variable first (set this once in GitHub → Settings → Variables)
+          HOST="${{ vars.EC2_HOST }}"
+          if [ -z "$HOST" ]; then
+            echo "EC2_HOST variable not set — querying AWS by tag..."
+            HOST=$(aws ec2 describe-instances \
+              --filters \
+                "Name=tag:Project,Values=parrot" \
+                "Name=instance-state-name,Values=running" \
+              --query 'Reservations[0].Instances[0].PublicIpAddress' \
+              --output text 2>/dev/null || echo "")
+          fi
+          if [ -z "$HOST" ] || [ "$HOST" = "None" ]; then
+            echo "::error::Could not resolve EC2 host. Set EC2_HOST as a GitHub variable or ensure the instance has a Project=parrot tag."
+            exit 1
+          fi
+          echo "host=$HOST" >> "$GITHUB_OUTPUT"
+          echo "Deploying to $HOST"
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN:    ${{ secrets.DOCKERHUB_TOKEN }}
+          IMAGE:              ${{ needs.build-scan-push.outputs.image }}
+        with:
+          host:     ${{ steps.ec2.outputs.host }}
+          username: ubuntu
+          key:      ${{ secrets.EC2_SSH_KEY }}
+          port:     22
+          envs:     DOCKERHUB_USERNAME,DOCKERHUB_TOKEN,IMAGE
+          timeout:  180s
+          script: |
+            set -euo pipefail
+
+            echo "=== Authenticating to Docker Hub ==="
+            echo "$DOCKERHUB_TOKEN" \
+              | sudo docker login --username "$DOCKERHUB_USERNAME" --password-stdin
+
+            echo "=== Storing rollback image ==="
+            PREVIOUS=$(sudo docker inspect parrot \
+              --format='{{.Config.Image}}' 2>/dev/null || true)
+
+            echo "=== Pulling $IMAGE ==="
+            sudo docker pull "$IMAGE"
+
+            echo "=== Replacing container ==="
+            sudo docker stop --time=30 parrot 2>/dev/null || true
+            sudo docker rm               parrot 2>/dev/null || true
+
+            sudo docker run -d \
+              --name parrot \
+              --restart unless-stopped \
+              -p 8000:8000 \
+              --health-cmd 'curl -sf http://localhost:8000/ || exit 1' \
+              --health-interval 30s \
+              --health-timeout 10s \
+              --health-retries 3 \
+              --health-start-period 40s \
+              --log-driver json-file \
+              --log-opt max-size=50m \
+              --log-opt max-file=3 \
+              "$IMAGE"
+
+            echo "=== Waiting for healthy status ==="
+            for i in $(seq 1 12); do
+              STATUS=$(sudo docker inspect parrot \
+                --format='{{.State.Health.Status}}' 2>/dev/null || echo "unknown")
+              echo "  Attempt $i/12: $STATUS"
+              [ "$STATUS" = "healthy" ] && break
+              if [ "$i" -eq 12 ]; then
+                echo "ERR: Health check timed out — rolling back"
+                sudo docker stop parrot 2>/dev/null || true
+                sudo docker rm   parrot 2>/dev/null || true
+                if [ -n "$PREVIOUS" ]; then
+                  sudo docker run -d --name parrot \
+                    --restart unless-stopped -p 8000:8000 "$PREVIOUS"
+                  echo "Rolled back to $PREVIOUS"
+                fi
+                exit 1
+              fi
+              sleep 10
+            done
+
+            sudo docker image prune -f
+            echo "=== Deploy complete: $IMAGE ==="
+            sudo docker ps --filter name=parrot \
+              --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+
+      - name: Verify https://maibaaki.com
+        run: |
+          echo "Polling https://maibaaki.com ..."
+          for i in $(seq 1 12); do
+            STATUS=$(curl -o /dev/null -sw '%{http_code}' \
+              --max-time 5 "https://maibaaki.com/" 2>/dev/null || echo "000")
+            echo "  Attempt $i/12 — HTTP $STATUS"
+            [[ "$STATUS" =~ ^(200|301|302)$ ]] && echo "✓ Live" && exit 0
+            sleep 10
+          done
+          echo "::warning::maibaaki.com not responding — check ALB and DNS"
