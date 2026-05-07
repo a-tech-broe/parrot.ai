@@ -20,6 +20,6 @@ describe('App', () => {
 
   it('shows supported formats in the drop zone', () => {
     render(<App />)
-    expect(screen.getByText(/PDF/)).toBeDefined()
+    expect(screen.getAllByText(/PDF/).length).toBeGreaterThan(0)
   })
 })
