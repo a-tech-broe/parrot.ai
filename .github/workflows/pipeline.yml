@@ -139,13 +139,14 @@ jobs:
         env:
           TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
           TF_LOCK_TABLE:   ${{ secrets.TF_LOCK_TABLE }}
+          HOSTED_ZONE_ID:  ${{ secrets.HOSTED_ZONE_ID }}
         run: |
           missing=()
           [ -z "$TF_STATE_BUCKET" ] && missing+=("TF_STATE_BUCKET")
           [ -z "$TF_LOCK_TABLE"   ] && missing+=("TF_LOCK_TABLE")
+          [ -z "$HOSTED_ZONE_ID"  ] && missing+=("HOSTED_ZONE_ID")
           if [ ${#missing[@]} -gt 0 ]; then
             echo "::error::Missing GitHub secret(s): ${missing[*]}"
-            echo "Run scripts/bootstrap-tfstate.sh and add its output values as GitHub secrets."
             exit 1
           fi
 
@@ -249,7 +250,8 @@ jobs:
             -no-color \
             -out=tfplan \
             -lock-timeout=120s \
-            -var="key_pair_name=$EC2_KEY_PAIR_NAME"
+            -var="key_pair_name=$EC2_KEY_PAIR_NAME" \
+            -var="hosted_zone_id=${{ secrets.HOSTED_ZONE_ID }}"
         continue-on-error: true   # we handle failure explicitly below
 
       # Post / update plan comment on PRs
@@ -467,13 +469,14 @@ jobs:
         env:
           TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
           TF_LOCK_TABLE:   ${{ secrets.TF_LOCK_TABLE }}
+          HOSTED_ZONE_ID:  ${{ secrets.HOSTED_ZONE_ID }}
         run: |
           missing=()
           [ -z "$TF_STATE_BUCKET" ] && missing+=("TF_STATE_BUCKET")
           [ -z "$TF_LOCK_TABLE"   ] && missing+=("TF_LOCK_TABLE")
+          [ -z "$HOSTED_ZONE_ID"  ] && missing+=("HOSTED_ZONE_ID")
           if [ ${#missing[@]} -gt 0 ]; then
             echo "::error::Missing GitHub secret(s): ${missing[*]}"
-            echo "Run scripts/bootstrap-tfstate.sh and add its output values as GitHub secrets."
             exit 1
           fi
 
@@ -560,6 +563,7 @@ jobs:
           terraform apply -auto-approve -lock-timeout=120s tfplan
 
       - name: Capture outputs
+
         id: tf-output
         run: |
           IP=$(terraform output -raw ec2_public_ip)
@@ -568,18 +572,6 @@ jobs:
           echo "alb_dns=$ALB" >> "$GITHUB_OUTPUT"
           echo "EC2 public IP : $IP"
           echo "ALB DNS       : $ALB"
-
-      # Auto-delegate the Route 53 registered domain to the Terraform zone.
-      # Route 53 Domains API is always in us-east-1 regardless of AWS_REGION.
-      - name: Delegate domain to hosted zone
-        run: |
-          NS_JSON=$(terraform output -json route53_nameservers \
-            | jq '[.[] | {"Name": .}]')
-          aws route53domains update-domain-nameservers \
-            --region us-east-1 \
-            --domain-name "${{ vars.DOMAIN_NAME || 'maibaaki.com' }}" \
-            --nameservers "$NS_JSON"
-          echo "✓ Domain nameservers updated — ACM validation will complete shortly"
 
       - name: Terraform output summary
         run: terraform output

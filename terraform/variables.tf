@@ -44,3 +44,8 @@ variable "domain_name" {
   type        = string
   default     = "maibaaki.com"
 }
+
+variable "hosted_zone_id" {
+  description = "ID of the existing Route 53 hosted zone for domain_name"
+  type        = string
+}

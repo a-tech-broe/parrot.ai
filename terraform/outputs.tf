@@ -19,11 +19,6 @@ output "app_url" {
 }
 
 
-output "route53_nameservers" {
-  description = "Nameservers of the Terraform-managed hosted zone"
-  value       = aws_route53_zone.parrot.name_servers
-}
-
 output "ssh_command" {
   description = "SSH command to connect to the EC2 instance"
   value       = "ssh ubuntu@${aws_eip.parrot.public_ip}"
