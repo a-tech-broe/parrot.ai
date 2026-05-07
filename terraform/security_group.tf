@@ -1,6 +1,6 @@
 resource "aws_security_group" "parrot" {
   name        = "${var.app_name}-${var.environment}"
-  description = "Parrot application — HTTP + SSH ingress"
+  description = "Parrot application - HTTP + SSH ingress"
   vpc_id      = data.aws_vpc.default.id
 
   # SSH

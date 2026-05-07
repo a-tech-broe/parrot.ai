@@ -161,6 +161,21 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
 
+      - name: Resolve EC2 key pair name
+        run: |
+          KEY_PAIR="${{ vars.EC2_KEY_PAIR_NAME }}"
+          if [ -z "$KEY_PAIR" ]; then
+            echo "EC2_KEY_PAIR_NAME not set — discovering from AWS..."
+            KEY_PAIR=$(aws ec2 describe-key-pairs \
+              --query 'KeyPairs[0].KeyName' --output text 2>/dev/null || true)
+            if [ -z "$KEY_PAIR" ] || [ "$KEY_PAIR" = "None" ]; then
+              echo "::error::No EC2 key pairs found in the AWS account. Create one first."
+              exit 1
+            fi
+            echo "Discovered key pair: $KEY_PAIR"
+          fi
+          echo "EC2_KEY_PAIR_NAME=$KEY_PAIR" >> "$GITHUB_ENV"
+
       - name: Terraform Init
         id: init
         run: |
@@ -213,7 +228,7 @@ jobs:
           terraform plan \
             -no-color \
             -out=tfplan \
-            -var="ssh_public_key=${{ secrets.EC2_SSH_PUBLIC_KEY }}"
+            -var="key_pair_name=$EC2_KEY_PAIR_NAME"
         continue-on-error: true   # we handle failure explicitly below
 
       # Post / update plan comment on PRs
