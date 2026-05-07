@@ -88,7 +88,7 @@ terraform/
 ├── backend.tf        S3 remote state (partial — config injected by CI)
 ├── main.tf           EC2 instance + Elastic IP
 ├── alb.tf            Application Load Balancer, listeners, target group
-├── acm.tf            ACM certificate (data source — uses existing cert)
+├── acm.tf            ACM certificate + DNS validation records
 ├── route53.tf        Hosted zone + A alias records for apex and www
 ├── iam.tf            EC2 instance role (ECR read + CloudWatch)
 ├── security_group.tf EC2 SG (SSH + ALB-only app traffic)
@@ -169,9 +169,11 @@ PR or push
 | `EC2_KEY_PAIR_NAME` | `my-keypair` | *(optional)* Existing EC2 key pair name — auto-discovered if not set |
 | `SLACK_NOTIFICATIONS` | `true` | Enable Slack deploy notifications |
 
-### DNS wiring (one-time, after first apply)
+### DNS delegation (automatic)
 
-After the first `terraform apply`, check the `route53_nameservers` output in the pipeline summary and update your domain registrar to use those four nameservers for `maibaaki.com`. Route 53 then handles DNS for both the apex and `www` subdomains, pointing them to the ALB.
+After `terraform apply`, the pipeline automatically calls `route53domains update-domain-nameservers` to point `maibaaki.com` at the new Route 53 hosted zone. ACM then validates the certificate against those DNS records within ~2 minutes and the HTTPS listener comes online.
+
+If you ever need the nameservers manually, they are printed in the pipeline step summary under `route53_nameservers`.
 
 ---
 
