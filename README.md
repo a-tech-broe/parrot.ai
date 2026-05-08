@@ -114,7 +114,7 @@ Three GitHub Actions workflows live in `.github/workflows/`:
 |----------|---------|---------|
 | `pipeline.yml` | Push / PR to `main` | Full CI/CD — test, scan, build, apply infra, deploy |
 | `deploy.yml` | Manual | Build + deploy only, no Terraform — use when infra is already up |
-| `cleanup.yml` | Manual | Fix state locks · prune Docker tags · terraform destroy |
+| `cleanup.yml` | Manual | Diagnose, fix state, prune Docker tags, or destroy |
 
 ### pipeline.yml — push to `main`
 
@@ -140,12 +140,18 @@ PR or push
   ║  deploy                                                ║
   ║  └── SSH → pull image → replace container              ║
   ║       → health check → auto-rollback on failure        ║
+  ║       → domain reachability check (warning only —      ║
+  ║         non-fatal while ACM cert is validating)        ║
   ║                                                        ║
-  ║  smoke-test    live checks against https://maibaaki.com║
+  ║  smoke-test                                            ║
+  ║  ├── try https://maibaaki.com                          ║
+  ║  └── fall back to ALB DNS (--no-verify) if domain down ║
   ║                                                        ║
   ║  report        GitHub Step Summary + Slack             ║
   ╚════════════════════════════════════════════════════════╝
 ```
+
+**Domain reachability** — the deploy job confirms the container is healthy on EC2 via Docker's own health check. The `https://maibaaki.com` check after that emits a warning (not a failure) while the ACM certificate is still being DNS-validated. Smoke tests automatically fall back to the ALB DNS name when the domain isn't responding, skipping TLS verification (`--no-verify`) since the ACM cert covers `maibaaki.com`, not the ALB hostname.
 
 ### deploy.yml — manual deploy
 
@@ -153,15 +159,18 @@ Builds, scans, and deploys the current `main` HEAD without running Terraform. Re
 
 Go to **Actions → Deploy → Run workflow**.
 
-### cleanup.yml — manual cleanup
+### cleanup.yml — manual cleanup / diagnostics
 
 | Target | What it does |
 |--------|-------------|
-| `state` | Releases stale DynamoDB locks, removes orphaned state entries |
-| `docker-images` | Prunes Docker Hub tags, keeps newest 10 |
+| `verify` | Check DNS resolution, ACM certificate status, ALB + EC2 health |
+| `state` | Release stale DynamoDB locks, remove orphaned Terraform state entries |
+| `docker-images` | Prune Docker Hub tags, keep newest 10 |
 | `infrastructure` | `terraform destroy` — requires typing `destroy` to confirm |
 
 Go to **Actions → Cleanup → Run workflow**.
+
+**Use `verify` first** when `maibaaki.com` is unreachable — it shows whether the problem is DNS not pointing at the ALB, the ACM cert not yet validated, or the container itself being down.
 
 ---
 
@@ -215,7 +224,7 @@ parrot.ai/
 ├── tests/
 │   ├── test_api.py            FastAPI endpoint tests
 │   ├── test_parsers.py        Parser unit tests
-│   └── smoke/smoke_test.py    Live smoke tests (targets https://maibaaki.com)
+│   └── smoke/smoke_test.py    Live smoke tests; --no-verify flag for ALB fallback
 ├── terraform/                 All infrastructure-as-code
 ├── scripts/
 │   └── bootstrap-tfstate.sh   One-time S3 + DynamoDB state backend setup
@@ -223,7 +232,7 @@ parrot.ai/
     └── workflows/
         ├── pipeline.yml       Full CI/CD pipeline
         ├── deploy.yml         Manual deploy (no Terraform)
-        └── cleanup.yml        Manual cleanup and destroy
+        └── cleanup.yml        Manual cleanup, diagnostics, and destroy
 ```
 
 ---

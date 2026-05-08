@@ -6,12 +6,13 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: "What to clean up"
+        description: "What to clean up / check"
         required: true
         type: choice
         options:
           - state          # fix Terraform state (stale locks + orphaned entries)
           - docker-images  # prune old Docker Hub tags, keep last 10
+          - verify         # check DNS, ACM cert status, and app reachability
           - infrastructure # terraform destroy — tears down ALL AWS resources
       confirm:
         description: 'For infrastructure: type "destroy" to confirm teardown'
@@ -116,7 +117,95 @@ jobs:
           echo "── Managed resources ──"
           terraform state list || echo "(state is empty)"
 
-  # ── 2. Prune Docker Hub image tags ────────────────────────────────────────────
+  # ── 2. Verify DNS, ACM cert, and app reachability ────────────────────────────
+  # Use this when maibaaki.com is unreachable to understand the root cause:
+  # whether DNS isn't pointing at the ALB, the ACM cert isn't validated, or
+  # the container itself is down.
+  verify:
+    name: Verify App & DNS & ACM
+    needs: guard
+    if: inputs.target == 'verify'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: DNS resolution check
+        run: |
+          DOMAIN="maibaaki.com"
+          echo "── DNS resolution ──────────────────────────────"
+          echo "A records for $DOMAIN:"
+          dig +short "$DOMAIN" @8.8.8.8 || echo "(no A records)"
+          echo ""
+          echo "A records for www.$DOMAIN:"
+          dig +short "www.$DOMAIN" @8.8.8.8 || echo "(no A records)"
+          echo ""
+          echo "NS records for $DOMAIN (registrar should delegate to these):"
+          dig +short "$DOMAIN" NS @8.8.8.8 || echo "(no NS records)"
+
+      - name: ACM certificate status
+        run: |
+          echo "── ACM Certificate ─────────────────────────────"
+          CERT_ARN=$(aws acm list-certificates \
+            --query "CertificateSummaryList[?DomainName=='maibaaki.com'].CertificateArn | [0]" \
+            --output text 2>/dev/null || echo "")
+          if [ -z "$CERT_ARN" ] || [ "$CERT_ARN" = "None" ]; then
+            echo "No ACM certificate found for maibaaki.com"
+            exit 0
+          fi
+          echo "Certificate ARN: $CERT_ARN"
+          aws acm describe-certificate \
+            --certificate-arn "$CERT_ARN" \
+            --query 'Certificate.{Status:Status,ValidationMethod:DomainValidationOptions[0].ValidationMethod,ValidationStatus:DomainValidationOptions[0].ValidationStatus,CNAME:DomainValidationOptions[0].ResourceRecord.Name}' \
+            --output table
+          echo ""
+          echo "Validation CNAMEs in hosted zone ${{ secrets.HOSTED_ZONE_ID }}:"
+          aws route53 list-resource-record-sets \
+            --hosted-zone-id "${{ secrets.HOSTED_ZONE_ID }}" \
+            --query "ResourceRecordSets[?Type=='CNAME'].{Name:Name,Value:ResourceRecords[0].Value}" \
+            --output table 2>/dev/null || echo "(zone empty or no CNAMEs)"
+
+      - name: App reachability check
+        run: |
+          echo "── App Reachability ────────────────────────────"
+
+          # Try the custom domain
+          echo "Testing https://maibaaki.com ..."
+          for i in 1 2 3; do
+            STATUS=$(curl -o /dev/null -sw '%{http_code}' --max-time 8 \
+              "https://maibaaki.com/" 2>/dev/null || echo "000")
+            echo "  Attempt $i: HTTP $STATUS"
+            [[ "$STATUS" =~ ^(200|301|302)$ ]] && echo "  ✓ maibaaki.com is up" && break
+          done
+
+          # Try the ALB directly (cert mismatch expected, skip verify)
+          ALB=$(aws elbv2 describe-load-balancers \
+            --query "LoadBalancers[?contains(LoadBalancerName,'parrot')].DNSName | [0]" \
+            --output text 2>/dev/null || echo "")
+          if [ -n "$ALB" ] && [ "$ALB" != "None" ]; then
+            echo ""
+            echo "Testing ALB directly (https://$ALB) ..."
+            STATUS=$(curl -k -o /dev/null -sw '%{http_code}' --max-time 8 \
+              "https://$ALB/" 2>/dev/null || echo "000")
+            echo "  HTTP $STATUS"
+            [[ "$STATUS" =~ ^(200|301|302)$ ]] \
+              && echo "  ✓ ALB is serving traffic (app is up, domain/cert is the blocker)" \
+              || echo "  ✗ ALB not responding — container or ALB target health may be the issue"
+          fi
+
+          echo ""
+          echo "── EC2 Instance ────────────────────────────────"
+          aws ec2 describe-instances \
+            --filters "Name=tag:Project,Values=parrot" "Name=instance-state-name,Values=running" \
+            --query "Reservations[].Instances[].{ID:InstanceId,State:State.Name,IP:PublicIpAddress,Type:InstanceType}" \
+            --output table 2>/dev/null || echo "(no running instances found)"
+
+  # ── 3. Prune Docker Hub image tags ────────────────────────────────────────────
   cleanup-docker:
     name: Prune Docker Hub Tags
     needs: guard
