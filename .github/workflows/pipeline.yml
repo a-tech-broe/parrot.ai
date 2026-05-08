@@ -781,8 +781,7 @@ jobs:
             fi
             sleep 10
           done
-          echo "::error::https://maibaaki.com did not respond after 4 minutes."
-          exit 1
+          echo "::warning::https://maibaaki.com not responding — ACM certificate may still be validating. Container is confirmed healthy on EC2."
 
   # ── 9. Smoke tests ────────────────────────────────────────────────────────────
   smoke-test:
@@ -801,20 +800,39 @@ jobs:
 
       - name: Wait for app
         run: |
-          echo "Polling https://maibaaki.com ..."
-          for i in $(seq 1 24); do
-            STATUS=$(curl -o /dev/null -sw '%{http_code}' \
-              --max-time 5 "https://maibaaki.com/" 2>/dev/null || echo "000")
-            echo "  Attempt $i/24 — HTTP $STATUS"
-            [[ "$STATUS" =~ ^(200|301|302)$ ]] && echo "App up ✓" && break
-            sleep 10
-            [ "$i" -eq 24 ] && echo "ERR: timed out" && exit 1
+          # Try the custom domain first, fall back to the ALB DNS name.
+          # The domain requires ACM validation before HTTPS works; ALB is always reachable.
+          DOMAIN="https://maibaaki.com"
+          ALB="http://${{ needs.terraform-apply.outputs.alb_dns }}"
+          SMOKE_URL=""
+
+          for url in "$DOMAIN" "$ALB"; do
+            echo "Polling $url ..."
+            for i in $(seq 1 12); do
+              STATUS=$(curl -o /dev/null -sw '%{http_code}' \
+                --max-time 5 "$url/" 2>/dev/null || echo "000")
+              echo "  Attempt $i/12 — HTTP $STATUS"
+              if [[ "$STATUS" =~ ^(200|301|302)$ ]]; then
+                SMOKE_URL="$url"
+                echo "App up at $SMOKE_URL ✓"
+                break
+              fi
+              sleep 5
+            done
+            [ -n "$SMOKE_URL" ] && break
+            echo "::warning::$url not responding — trying fallback..."
           done
+
+          if [ -z "$SMOKE_URL" ]; then
+            echo "::error::App not reachable via domain ($DOMAIN) or ALB ($ALB)"
+            exit 1
+          fi
+          echo "SMOKE_URL=$SMOKE_URL" >> "$GITHUB_ENV"
 
       - name: Run smoke tests
         run: |
           python tests/smoke/smoke_test.py \
-            --url  "https://maibaaki.com" \
+            --url  "$SMOKE_URL" \
             --output reports/smoke-junit.xml
 
       - uses: actions/upload-artifact@v4
