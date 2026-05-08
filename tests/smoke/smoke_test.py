@@ -17,13 +17,13 @@ def check(name: str, fn) -> TestCase:
     return tc
 
 
-def run(base_url: str) -> list[TestCase]:
+def run(base_url: str, verify_tls: bool = True) -> list[TestCase]:
     base = base_url.rstrip("/")
     cases = []
 
     # 1 — Home page returns HTML
     def test_home():
-        r = requests.get(f"{base}/", timeout=10)
+        r = requests.get(f"{base}/", timeout=10, verify=verify_tls)
         assert r.status_code == 200, f"Expected 200, got {r.status_code}"
         assert "text/html" in r.headers.get("content-type", ""), "Response is not HTML"
 
@@ -35,6 +35,7 @@ def run(base_url: str) -> list[TestCase]:
             f"{base}/api/parse",
             files={"file": ("doc.xyz", b"data", "application/octet-stream")},
             timeout=10,
+            verify=verify_tls,
         )
         assert r.status_code == 400, f"Expected 400, got {r.status_code}"
         assert "detail" in r.json()
@@ -48,6 +49,7 @@ def run(base_url: str) -> list[TestCase]:
             f"{base}/api/parse",
             files={"file": ("smoke.txt", payload, "text/plain")},
             timeout=15,
+            verify=verify_tls,
         )
         assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
         data = r.json()
@@ -62,6 +64,7 @@ def run(base_url: str) -> list[TestCase]:
             f"{base}/api/parse",
             files={"file": ("empty.txt", b"   ", "text/plain")},
             timeout=10,
+            verify=verify_tls,
         )
         assert r.status_code == 422, f"Expected 422, got {r.status_code}"
 
@@ -71,7 +74,7 @@ def run(base_url: str) -> list[TestCase]:
     def test_response_time():
         import time
         start = time.perf_counter()
-        requests.get(f"{base}/", timeout=10)
+        requests.get(f"{base}/", timeout=10, verify=verify_tls)
         elapsed = time.perf_counter() - start
         assert elapsed < 3.0, f"Home page took {elapsed:.2f}s (>3s)"
 
@@ -82,12 +85,18 @@ def run(base_url: str) -> list[TestCase]:
 
 def main():
     parser = argparse.ArgumentParser(description="Parrot smoke tests")
-    parser.add_argument("--url",    required=True, help="Base URL of the deployment")
-    parser.add_argument("--output", default="reports/smoke-junit.xml", help="JUnit XML output path")
+    parser.add_argument("--url",       required=True, help="Base URL of the deployment")
+    parser.add_argument("--output",    default="reports/smoke-junit.xml", help="JUnit XML output path")
+    parser.add_argument("--no-verify", action="store_true", dest="no_verify",
+                        help="Skip TLS certificate verification (use when testing via ALB DNS directly)")
     args = parser.parse_args()
 
+    if args.no_verify:
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
     print(f"\n🦜 Parrot Smoke Tests → {args.url}\n")
-    cases = run(args.url)
+    cases = run(args.url, verify_tls=not args.no_verify)
 
     passed = sum(1 for c in cases if not c.is_failure() and not c.is_error())
     total  = len(cases)
