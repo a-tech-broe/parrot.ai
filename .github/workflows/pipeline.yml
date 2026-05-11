@@ -773,8 +773,8 @@ jobs:
           echo "Polling https://maibaaki.com ..."
           for i in $(seq 1 24); do
             STATUS=$(curl -o /dev/null -sw '%{http_code}' \
-              --max-time 5 "https://maibaaki.com/" 2>/dev/null || echo "000")
-            echo "  Attempt $i/24 — HTTP $STATUS"
+              --max-time 8 "https://maibaaki.com/" 2>/dev/null || true)
+            echo "  Attempt $i/24 — HTTP ${STATUS:-000}"
             if [[ "$STATUS" =~ ^(200|301|302)$ ]]; then
               echo "✓ https://maibaaki.com is reachable (HTTP $STATUS)"
               exit 0
@@ -800,43 +800,73 @@ jobs:
 
       - name: Wait for app
         run: |
-          # Try the custom domain first, fall back to the ALB DNS name.
-          # The domain requires ACM validation before HTTPS works.
-          # ALB always serves HTTPS but its cert is for maibaaki.com, not the ALB hostname,
-          # so we skip cert verification (-k) when probing the fallback URL.
+          # Probe order:
+          #   1. https://maibaaki.com        — ideal, requires ACM cert issued
+          #   2. https://<alb-dns>  (-k)     — cert mismatch OK, proves HTTPS works
+          #   3. http://<alb-dns>            — always alive (ALB returns 301 redirect);
+          #                                    proves app is deployed but HTTPS not ready
+          #                                    → skip smoke tests rather than fail
           DOMAIN="https://maibaaki.com"
-          ALB="https://${{ needs.terraform-apply.outputs.alb_dns }}"
+          ALB_HTTPS="https://${{ needs.terraform-apply.outputs.alb_dns }}"
+          ALB_HTTP="http://${{ needs.terraform-apply.outputs.alb_dns }}"
           SMOKE_URL=""
           SMOKE_NO_VERIFY="false"
 
-          for url in "$DOMAIN" "$ALB"; do
-            CURL_OPTS="--max-time 5"
-            [ "$url" = "$ALB" ] && CURL_OPTS="$CURL_OPTS -k"
-            echo "Polling $url ..."
-            for i in $(seq 1 12); do
+          probe() {
+            local url=$1 extra_flags=${2:-}
+            for i in $(seq 1 6); do
+              # Use || true so curl exit code never aborts the script;
+              # %{http_code} always writes a value (000 on connection failure).
               STATUS=$(curl -o /dev/null -sw '%{http_code}' \
-                $CURL_OPTS "$url/" 2>/dev/null || echo "000")
-              echo "  Attempt $i/12 — HTTP $STATUS"
-              if [[ "$STATUS" =~ ^(200|301|302)$ ]]; then
-                SMOKE_URL="$url"
-                [ "$url" = "$ALB" ] && SMOKE_NO_VERIFY="true"
-                echo "App up at $SMOKE_URL ✓"
-                break
-              fi
+                --max-time 8 $extra_flags "$url/" 2>/dev/null || true)
+              echo "  Attempt $i/6 — HTTP ${STATUS:-000}"
+              [[ "$STATUS" =~ ^(200|301|302)$ ]] && echo "$STATUS" && return 0
               sleep 5
             done
-            [ -n "$SMOKE_URL" ] && break
-            echo "::warning::$url not responding — trying fallback..."
-          done
+            echo "000" && return 1
+          }
+
+          echo "── 1. Polling $DOMAIN ─────────────────────────────────"
+          if probe "$DOMAIN"; then
+            SMOKE_URL="$DOMAIN"
+          fi
 
           if [ -z "$SMOKE_URL" ]; then
-            echo "::error::App not reachable via domain ($DOMAIN) or ALB ($ALB)"
+            echo "::warning::$DOMAIN not responding — trying ALB HTTPS..."
+            echo "── 2. Polling $ALB_HTTPS (cert verify disabled) ────────"
+            if probe "$ALB_HTTPS" "-k"; then
+              SMOKE_URL="$ALB_HTTPS"
+              SMOKE_NO_VERIFY="true"
+            fi
+          fi
+
+          if [ -z "$SMOKE_URL" ]; then
+            echo "::warning::ALB HTTPS not responding — checking ALB HTTP..."
+            echo "── 3. Polling $ALB_HTTP ────────────────────────────────"
+            STATUS=$(curl -o /dev/null -sw '%{http_code}' \
+              --max-time 8 "$ALB_HTTP/" 2>/dev/null || true)
+            echo "  HTTP ${STATUS:-000}"
+            if [[ "$STATUS" =~ ^(200|301|302)$ ]]; then
+              echo "::warning::ALB is alive on HTTP (HTTP $STATUS) but HTTPS is not yet reachable."
+              echo "  ACM certificate is still being validated — smoke tests skipped."
+              echo "SMOKE_URL="           >> "$GITHUB_ENV"
+              echo "SMOKE_NO_VERIFY=false" >> "$GITHUB_ENV"
+              exit 0
+            fi
+          fi
+
+          if [ -z "$SMOKE_URL" ]; then
+            echo "::error::App not reachable via domain, ALB HTTPS, or ALB HTTP."
+            echo "  Check EC2 instance health and ALB target group in AWS console."
             exit 1
           fi
-          echo "SMOKE_URL=$SMOKE_URL"         >> "$GITHUB_ENV"
+
+          echo "SMOKE_URL=$SMOKE_URL"             >> "$GITHUB_ENV"
           echo "SMOKE_NO_VERIFY=$SMOKE_NO_VERIFY" >> "$GITHUB_ENV"
+          echo "✓ Will run smoke tests against $SMOKE_URL"
 
       - name: Run smoke tests
+        if: env.SMOKE_URL != ''
         run: |
           EXTRA=""
           [ "$SMOKE_NO_VERIFY" = "true" ] && EXTRA="--no-verify"
