@@ -5,3 +5,12 @@
 #             used, so this vulnerability is not reachable in our runtime.
 #             Re-evaluate when a patched version lands in debian:13.
 CVE-2026-33845
+
+# CVE-2026-7598 — libssh2: integer overflow via large username/password (libssh2-1t64)
+# Severity  : CRITICAL
+# Status    : no fixed version available (affected, 2026-05-11)
+# Rationale : libssh2 is a transitive Debian system dependency; Parrot does not
+#             initiate or accept SSH connections — the vulnerable SSH handshake
+#             code path is never executed. Re-evaluate when a patched version
+#             lands in debian:13.
+CVE-2026-7598
